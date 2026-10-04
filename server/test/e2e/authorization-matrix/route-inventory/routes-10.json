@@ -766,5 +766,77 @@
     "isPublic": false,
     "allowDefault": false,
     "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-journal/book-journal.controller.ts",
+    "className": "BookJournalController",
+    "methodName": "list",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/journal",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-journal/book-journal.controller.ts",
+    "className": "BookJournalController",
+    "methodName": "create",
+    "httpMethod": "POST",
+    "path": "/books/:bookId/journal",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-journal/book-journal.controller.ts",
+    "className": "BookJournalController",
+    "methodName": "update",
+    "httpMethod": "PATCH",
+    "path": "/books/:bookId/journal/:clientId",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-journal/book-journal.controller.ts",
+    "className": "BookJournalController",
+    "methodName": "trash",
+    "httpMethod": "DELETE",
+    "path": "/books/:bookId/journal/:clientId",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-journal/book-journal.controller.ts",
+    "className": "BookJournalController",
+    "methodName": "restore",
+    "httpMethod": "POST",
+    "path": "/books/:bookId/journal/:clientId/restore",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-journal/book-journal.controller.ts",
+    "className": "BookJournalController",
+    "methodName": "purge",
+    "httpMethod": "DELETE",
+    "path": "/books/:bookId/journal/:clientId/permanent",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
   }
 ]

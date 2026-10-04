@@ -37,6 +37,7 @@ import { CollectionModule } from './modules/collection/collection.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { CbzModule } from './modules/reader/cbz/cbz.module';
 import { BookmarkModule } from './modules/bookmark/bookmark.module';
+import { BookJournalModule } from './modules/book-journal/book-journal.module';
 import { BookModule } from './modules/book/book.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
 import { CoverModule } from './modules/cover/cover.module';
@@ -157,6 +158,7 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     KoboModule,
     OpdsModule,
     BookmarkModule,
+    BookJournalModule,
     AnnotationModule,
     DashboardModule,
     HealthModule,

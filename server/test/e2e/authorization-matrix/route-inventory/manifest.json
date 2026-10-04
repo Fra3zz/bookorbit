@@ -1,7 +1,7 @@
 {
-  "totalRoutes": 614,
+  "totalRoutes": 623,
   "byPermission": {
-    "(none)": 262,
+    "(none)": 271,
     "Permission.ManageMetadataConfig": 34,
     "Permission.EmailSend": 30,
     "Permission.LibraryEditMetadata": 35,
