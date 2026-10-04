@@ -5,7 +5,7 @@
  *
  * Named apart from `APP_FEATURES` in app-features.ts, which holds the build-time feature flags.
  */
-export const SERVER_FEATURES = ["annotation-stars", "annotation-color-names", "annotation-trash", "book-journal", "bookmark-edit"] as const;
+export const SERVER_FEATURES = ["annotation-stars", "annotation-color-names", "annotation-trash", "book-journal", "bookmark-edit", "notebook-hub"] as const;
 
 export type ServerFeature = (typeof SERVER_FEATURES)[number];
 
