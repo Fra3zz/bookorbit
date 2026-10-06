@@ -162,19 +162,53 @@ describe('FileRenameRepository', () => {
     ]);
   });
 
-  it('findBookByExactFolderPath returns the exact folder owner in a library', async () => {
-    const row = { id: 99, folderPath: '/library/Author/Book', primaryFileId: 42, status: 'present' };
+  it('findFolderOwners maps each held folder to its book, title, and first-listed author', async () => {
     const db = {
-      select: vi.fn().mockReturnValue({
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnThis(),
+          leftJoin: vi.fn().mockReturnThis(),
+          where: vi.fn().mockResolvedValue([
+            { bookId: 99, folderPath: '/library/Frank Herbert/Dune', title: 'Dune' },
+            { bookId: 100, folderPath: '/library/Anonymous/Beowulf', title: null },
+          ]),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnThis(),
+          innerJoin: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          orderBy: vi.fn().mockResolvedValue([
+            { bookId: 99, name: 'Frank Herbert' },
+            { bookId: 99, name: 'Brian Herbert' },
+          ]),
+        }),
+    };
+
+    const repo = new FileRenameRepository(db as never);
+    const owners = await repo.findFolderOwners(3, ['/library/Frank Herbert/Dune', '/library/Anonymous/Beowulf', '/library/Frank Herbert/Dune']);
+
+    expect(owners).toEqual(
+      new Map([
+        ['/library/Frank Herbert/Dune', { bookId: 99, title: 'Dune', primaryAuthor: 'Frank Herbert' }],
+        ['/library/Anonymous/Beowulf', { bookId: 100, title: null, primaryAuthor: null }],
+      ]),
+    );
+  });
+
+  it('findFolderOwners skips the author query when no book holds any of the folders', async () => {
+    const db = {
+      select: vi.fn().mockReturnValueOnce({
         from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        limit: vi.fn().mockResolvedValue([row]),
+        leftJoin: vi.fn().mockReturnThis(),
+        where: vi.fn().mockResolvedValue([]),
       }),
     };
 
     const repo = new FileRenameRepository(db as never);
 
-    await expect(repo.findBookByExactFolderPath(3, '/library/Author/Book')).resolves.toEqual(row);
+    await expect(repo.findFolderOwners(3, ['/library/Frank Herbert/Dune'])).resolves.toEqual(new Map());
+    expect(db.select).toHaveBeenCalledTimes(1);
   });
 
   it('applyExistingFolderMerge reassigns files, deletes the source book, and fills a missing target primary', async () => {

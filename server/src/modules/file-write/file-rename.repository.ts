@@ -45,6 +45,14 @@ export interface BookFilePathUpdate {
   relPath: string | null;
 }
 
+export interface FolderOwner {
+  bookId: number;
+  title: string | null;
+  primaryAuthor: string | null;
+}
+
+const FOLDER_OWNER_BATCH_SIZE = 500;
+
 @Injectable()
 export class FileRenameRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
@@ -164,22 +172,42 @@ export class FileRenameRepository {
     });
   }
 
-  async findBookByExactFolderPath(
-    libraryId: number,
-    folderPath: string,
-  ): Promise<Pick<typeof books.$inferSelect, 'id' | 'folderPath' | 'primaryFileId' | 'status'> | null> {
-    const [row] = await this.db
-      .select({
-        id: books.id,
-        folderPath: books.folderPath,
-        primaryFileId: books.primaryFileId,
-        status: books.status,
-      })
-      .from(books)
-      .where(and(eq(books.libraryId, libraryId), eq(books.folderPath, folderPath)))
-      .limit(1);
+  /** The book that holds each folder, keyed by folder path. Folders no book holds are absent. */
+  async findFolderOwners(libraryId: number, folderPaths: string[]): Promise<Map<string, FolderOwner>> {
+    const owners = new Map<string, FolderOwner>();
+    const uniquePaths = [...new Set(folderPaths)];
 
-    return row ?? null;
+    for (let i = 0; i < uniquePaths.length; i += FOLDER_OWNER_BATCH_SIZE) {
+      const batch = uniquePaths.slice(i, i + FOLDER_OWNER_BATCH_SIZE);
+      const rows = await this.db
+        .select({ bookId: books.id, folderPath: books.folderPath, title: bookMetadata.title })
+        .from(books)
+        .leftJoin(bookMetadata, eq(bookMetadata.bookId, books.id))
+        .where(and(eq(books.libraryId, libraryId), inArray(books.folderPath, batch)));
+      if (rows.length === 0) continue;
+
+      const ownerIds = rows.map((row) => row.bookId);
+      const authorRows = await this.db
+        .select({ bookId: bookAuthors.bookId, name: authors.name })
+        .from(bookAuthors)
+        .innerJoin(authors, eq(authors.id, bookAuthors.authorId))
+        .where(inArray(bookAuthors.bookId, ownerIds))
+        .orderBy(asc(bookAuthors.bookId), asc(bookAuthors.displayOrder));
+      const primaryAuthorByBookId = new Map<number, string>();
+      for (const author of authorRows) {
+        if (!primaryAuthorByBookId.has(author.bookId)) primaryAuthorByBookId.set(author.bookId, author.name);
+      }
+
+      for (const row of rows) {
+        owners.set(row.folderPath, {
+          bookId: row.bookId,
+          title: row.title ?? null,
+          primaryAuthor: primaryAuthorByBookId.get(row.bookId) ?? null,
+        });
+      }
+    }
+
+    return owners;
   }
 
   async applyExistingFolderMerge(input: {
