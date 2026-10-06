@@ -16,6 +16,8 @@ import { inArray, type SQL } from 'drizzle-orm';
 import { MAX_BOOK_QUERY_OFFSET_ROWS, isBookQueryOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { compareAudioTracks, coverFetchInputs, resolveIsAudiobook } from '../../common/utils/book-media.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { mapWithConcurrency } from '../../common/utils/batch.utils';
+import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { selectPrimaryFile } from '../../common/utils/primary-file-selection.utils';
 import { normalizeMetadataText, normalizeMetadataTextKey } from '../../common/utils/metadata-text-normalize.utils';
 import { naturalCompare } from '../../common/utils/natural-sort.utils';
@@ -175,6 +177,7 @@ const EXPORT_LIMITS = {
 } as const;
 
 const MAX_DELETION_AUDIT_BOOKS = 25;
+const BOOK_DELETION_CONCURRENCY = 8;
 
 type ExportCandidateFile = {
   bookId: number;
@@ -293,6 +296,7 @@ export class BookService {
     private readonly customMetadataService: CustomMetadataService,
     private readonly bookMetadataLockService: BookMetadataLockService,
     private readonly coverStore: BookCoverStore,
+    private readonly selfWriteRegistry: SelfWriteRegistry,
     @Optional() private readonly embedder: BookEmbedderService,
     @Optional() private readonly fileWriteService: FileWriteService,
     @Optional() private readonly fileRenameService: FileRenameService,
@@ -1635,31 +1639,41 @@ export class BookService {
         const row = auditRowsById.get(bookId);
         return row ? [row] : [];
       });
-      const files = await this.bookRepo.findAllFilesByBookIds(bookIds);
-      await this.bookRepo.deleteByIdsAndInvalidateScanState(deletedBookIds);
-      const deleteTargets = [
-        ...rows.map((row) => ({
-          path: join(this.appDataPath, 'covers', String(row.id)),
-          options: { recursive: true, force: true },
-          kind: 'coverDir' as const,
-        })),
-        ...files.map((file) => ({ path: file.absolutePath, options: { force: true }, kind: 'bookFile' as const })),
-      ];
-      const deleteResults = await Promise.allSettled(deleteTargets.map((target) => rm(target.path, target.options)));
-      let failedDeletes = 0;
-      for (let i = 0; i < deleteResults.length; i += 1) {
-        const result = deleteResults[i];
-        if (result?.status !== 'rejected') continue;
-        failedDeletes += 1;
-        const target = deleteTargets[i]!;
-        const reason = result.reason;
-        const errorClass = reason instanceof Error ? reason.name : 'Error';
-        const errorMessage = sanitizeLogValue(reason instanceof Error ? reason.message : String(reason));
-        const pathValue = sanitizeLogValue(target.path);
-        this.logger.warn(
-          `[${event}] [fail] userId=${user.id} path="${pathValue}" kind=${target.kind} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - delete books cleanup target failed`,
-        );
-      }
+      const files = await this.bookRepo.findAllFilesByBookIds(deletedBookIds);
+      const removeTarget = async (path: string, kind: 'bookFile' | 'coverDir'): Promise<boolean> => {
+        try {
+          await rm(path, kind === 'coverDir' ? { recursive: true, force: true } : { force: true });
+          return true;
+        } catch (err) {
+          const errorClass = err instanceof Error ? err.name : 'Error';
+          const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+          this.logger.warn(
+            `[${event}] [fail] userId=${user.id} path="${sanitizeLogValue(path)}" kind=${kind} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - delete books cleanup target failed`,
+          );
+          return false;
+        }
+      };
+
+      // A surviving content file would be imported again by the scanner. Keep all records and
+      // user state on failure; force:true lets a retry finish after a partially removed batch.
+      const paths = [...new Set(files.map((file) => file.absolutePath))];
+      // Defer watcher reconciliation until the records reflect the intentional removal.
+      await this.selfWriteRegistry.track(paths, async () => {
+        const fileResults = await mapWithConcurrency(paths, BOOK_DELETION_CONCURRENCY, (path) => removeTarget(path, 'bookFile'));
+        if (fileResults.some((removed) => !removed)) {
+          throw new InternalServerErrorException(
+            "Could not delete all book files. Book records were kept, but some files may already be removed. Check the server's library permissions or read-only mounts, then retry.",
+          );
+        }
+
+        await this.bookRepo.deleteByIdsAndInvalidateScanState(deletedBookIds);
+      });
+      // Cover cleanup cannot resurrect a book and must not turn a committed deletion into a
+      // failure. Leave covers alone until the database transaction has succeeded.
+      const coverResults = await mapWithConcurrency(deletedBookIds, BOOK_DELETION_CONCURRENCY, (bookId) =>
+        removeTarget(join(this.appDataPath, 'covers', String(bookId)), 'coverDir'),
+      );
+      const failedDeletes = coverResults.filter((removed) => !removed).length;
       this.logger.log(
         `[${event}] [end] count=${bookIds.length} durationMs=${Date.now() - startedAt} deletedBooks=${rows.length} deletedFiles=${files.length} failedDeletes=${failedDeletes} - delete books completed`,
       );
