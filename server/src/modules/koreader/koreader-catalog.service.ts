@@ -559,19 +559,14 @@ export class KoreaderCatalogService {
   }
 
   private async getCollectionEntries(user: RequestUser): Promise<KoreaderCatalogEntry[]> {
-    const rows = await this.opdsBookService.getUserCollections(user.id);
-    return Promise.all(
-      rows.map(async (row) => {
-        const count = await this.countBooks(user, { collectionId: row.id });
-        return {
-          id: String(row.id),
-          title: row.name,
-          section: 'collections',
-          count,
-          booksHref: this.booksHref({ collectionId: row.id, sort: 'title' }),
-        };
-      }),
-    );
+    const rows = await this.opdsBookService.getUserCollections(user.id, user.isSuperuser, user.contentFilters);
+    return rows.map((row) => ({
+      id: String(row.id),
+      title: row.name,
+      section: 'collections',
+      count: row.bookCount,
+      booksHref: this.booksHref({ collectionId: row.id, sort: 'title' }),
+    }));
   }
 
   private async getSmartScopeEntries(user: RequestUser): Promise<KoreaderCatalogEntry[]> {
