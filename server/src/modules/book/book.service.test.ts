@@ -3070,11 +3070,11 @@ describe('BookService', () => {
       warnSpy.mockRestore();
     });
 
-    it('mirrors EPUB percentage to Kobo state for users with Kobo sync permission', async () => {
+    it.each(['epub', 'kepub'])('mirrors %s percentage to Kobo state for users with Kobo sync permission', async (format) => {
       const { service, bookRepo, libraryService, userBookStatusService } = makeService();
       const user = makeUser({ permissions: [Permission.KoboSync] });
 
-      bookRepo.findFileById.mockResolvedValue({ id: 8, bookId: 11, libraryId: 2, absolutePath: '/books/b.epub', format: 'epub' });
+      bookRepo.findFileById.mockResolvedValue({ id: 8, bookId: 11, libraryId: 2, absolutePath: '/books/b.epub', format });
       bookRepo.upsertProgress.mockResolvedValue(undefined);
       bookRepo.isKoboTwoWayProgressSyncEnabled.mockResolvedValue(true);
       bookRepo.syncKoboReadingStateFromProgress.mockResolvedValue(true);
@@ -3103,11 +3103,11 @@ describe('BookService', () => {
       });
     });
 
-    it('does not mirror EPUB percentage to Kobo state when two-way sync is disabled', async () => {
+    it.each(['epub', 'kepub'])('does not mirror %s percentage to Kobo state when two-way sync is disabled', async (format) => {
       const { service, bookRepo, libraryService } = makeService();
       const user = makeUser({ permissions: [Permission.KoboSync] });
 
-      bookRepo.findFileById.mockResolvedValue({ id: 8, bookId: 11, libraryId: 2, absolutePath: '/books/b.epub', format: 'epub' });
+      bookRepo.findFileById.mockResolvedValue({ id: 8, bookId: 11, libraryId: 2, absolutePath: '/books/b.epub', format });
       bookRepo.upsertProgress.mockResolvedValue(undefined);
       bookRepo.isKoboTwoWayProgressSyncEnabled.mockResolvedValue(false);
       libraryService.verifyUserAccess.mockResolvedValue(undefined);
@@ -3206,11 +3206,11 @@ describe('BookService', () => {
       });
     });
 
-    it('does not mirror EPUB percentage to Kobo state without Kobo sync permission', async () => {
+    it.each(['epub', 'kepub'])('does not mirror %s percentage to Kobo state without Kobo sync permission', async (format) => {
       const { service, bookRepo, libraryService } = makeService();
       const user = makeUser();
 
-      bookRepo.findFileById.mockResolvedValue({ id: 8, bookId: 11, libraryId: 2, absolutePath: '/books/b.epub', format: 'epub' });
+      bookRepo.findFileById.mockResolvedValue({ id: 8, bookId: 11, libraryId: 2, absolutePath: '/books/b.epub', format });
       bookRepo.upsertProgress.mockResolvedValue(undefined);
       libraryService.verifyUserAccess.mockResolvedValue(undefined);
       libraryService.findOne = vi.fn().mockResolvedValue({ readingThreshold: 1, markAsFinishedPercentComplete: 99 });

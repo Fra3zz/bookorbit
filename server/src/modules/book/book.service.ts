@@ -2276,7 +2276,11 @@ export class BookService {
     // Everything downstream reads the position the file now holds, not the one the client sent.
     // A narration write that did not move the text position must not move a Kobo bookmark, an
     // audiobook position, or a read status either.
-    if (file.format === 'epub' && this.hasPermission(user, Permission.KoboSync) && (await this.bookRepo.isKoboTwoWayProgressSyncEnabled(userId))) {
+    if (
+      (file.format === 'epub' || file.format === 'kepub') &&
+      this.hasPermission(user, Permission.KoboSync) &&
+      (await this.bookRepo.isKoboTwoWayProgressSyncEnabled(userId))
+    ) {
       await this.bookRepo.syncKoboReadingStateFromProgress(
         userId,
         fileId,

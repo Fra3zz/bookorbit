@@ -1262,12 +1262,12 @@ describe('BookRepository', () => {
     );
   });
 
-  it('syncs primary EPUB progress into Kobo reading state and marks snapshot row pending', async () => {
+  it.each(['epub', 'kepub'])('syncs primary %s progress into Kobo reading state and marks snapshot row pending', async (format) => {
     const insertChain = makeInsertChain();
     const db = {
       select: vi
         .fn()
-        .mockReturnValueOnce(makeSelectChain('limit', [{ bookId: 10, primaryFileId: 9, format: 'epub', markAsFinishedPercentComplete: 98 }]))
+        .mockReturnValueOnce(makeSelectChain('limit', [{ bookId: 10, primaryFileId: 9, format, markAsFinishedPercentComplete: 98 }]))
         .mockReturnValueOnce(
           makeSelectChain('limit', [
             {
