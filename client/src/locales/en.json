@@ -9259,6 +9259,13 @@
         "createFolder": "Could not create folder"
       }
     },
+    "destination": {
+      "loadFailed": "Could not load destination libraries. Close and reopen to try again.",
+      "noLibraries": "No book libraries are available. Create a library or ask an administrator for access.",
+      "noFolders": "This library has no destination folders. Add a folder in Library settings.",
+      "unavailable": "The selected library is no longer available.",
+      "selectFolder": "Select a folder..."
+    },
     "upload": {
       "library": "Library",
       "selectLibrary": "Select a library...",
