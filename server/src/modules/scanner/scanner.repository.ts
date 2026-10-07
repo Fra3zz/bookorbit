@@ -1,14 +1,16 @@
 import { deleteBookFilesWithHashInvalidation, deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import {
+  audiobookProgress,
   authors,
   bookAuthors,
   bookFiles,
+  bookmarks,
   bookGenres,
   bookMetadata,
   books,
@@ -387,6 +389,60 @@ export class ScannerRepository {
 
   async findBookFilesByBookId(bookId: number) {
     return this.db.select().from(bookFiles).where(eq(bookFiles.bookId, bookId));
+  }
+
+  async findBookFileFormats(bookId: number): Promise<Array<{ id: number; format: string | null }>> {
+    return this.db.select({ id: bookFiles.id, format: bookFiles.format }).from(bookFiles).where(eq(bookFiles.bookId, bookId));
+  }
+
+  /**
+   * Rewrites a book's stored audio positions after its track order changed: every user's audio
+   * bookmarks, which hold a position from the start of the book, and the progress percentage, which
+   * follows from it. Rows are locked so none is read under one order and written under the other.
+   */
+  async remapAudioPositions(
+    bookId: number,
+    remapPosition: (positionSeconds: number) => number | null,
+    percentageAt: (fileId: number, offsetSeconds: number) => number | null,
+  ): Promise<{ bookmarks: number; progress: number }> {
+    return this.db.transaction(async (tx) => {
+      let bookmarksUpdated = 0;
+      const bookmarkRows = await tx
+        .select({ id: bookmarks.id, positionSeconds: bookmarks.positionSeconds })
+        .from(bookmarks)
+        .where(and(eq(bookmarks.bookId, bookId), isNull(bookmarks.cfi), isNotNull(bookmarks.positionSeconds)))
+        .for('update');
+      for (const row of bookmarkRows) {
+        const positionSeconds = remapPosition(row.positionSeconds!);
+        if (positionSeconds === null || positionSeconds === row.positionSeconds) continue;
+        await tx.update(bookmarks).set({ positionSeconds }).where(eq(bookmarks.id, row.id));
+        bookmarksUpdated++;
+      }
+
+      let progressUpdated = 0;
+      const progressRows = await tx
+        .select({
+          userId: audiobookProgress.userId,
+          currentFileId: audiobookProgress.currentFileId,
+          positionSeconds: audiobookProgress.positionSeconds,
+          percentage: audiobookProgress.percentage,
+        })
+        .from(audiobookProgress)
+        .where(eq(audiobookProgress.bookId, bookId))
+        .for('update');
+      for (const row of progressRows) {
+        // A finished book stays finished: its last position was the end of the old order.
+        if (row.percentage >= 100) continue;
+        const percentage = percentageAt(row.currentFileId, row.positionSeconds);
+        if (percentage === null || percentage === row.percentage) continue;
+        await tx
+          .update(audiobookProgress)
+          .set({ percentage })
+          .where(and(eq(audiobookProgress.userId, row.userId), eq(audiobookProgress.bookId, bookId)));
+        progressUpdated++;
+      }
+      return { bookmarks: bookmarksUpdated, progress: progressUpdated };
+    });
   }
 
   async findBookFilesByBookIds(bookIds: number[]): Promise<(typeof bookFiles.$inferSelect)[]> {

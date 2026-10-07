@@ -21,7 +21,7 @@ import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { selectPrimaryFile } from '../../common/utils/primary-file-selection.utils';
 import { normalizeMetadataText, normalizeMetadataTextKey } from '../../common/utils/metadata-text-normalize.utils';
-import { naturalCompare } from '../../common/utils/natural-sort.utils';
+import { compareBookFilePaths } from '../../common/utils/audio-track-order.utils';
 import { normalizePublishedDate, publishedYearFromDateKey } from '../../common/utils/published-date.utils';
 import { buildPatternTokens } from '../../common/utils/pattern-tokens.utils';
 import { SeriesExpectedCountService } from '../../common/services/series-expected-count.service';
@@ -3267,9 +3267,7 @@ export class BookService {
     const meta = book.book_metadata;
     const customMetadata = await this.customMetadataService.getBookValues(id, book.books.libraryId);
     const hasAudioFiles = fileRows.some((f) => f.format && isAudioFormat(f.format));
-    const orderedFileRows = hasAudioFiles
-      ? [...fileRows].sort((a, b) => naturalCompare(basename(a.absolutePath), basename(b.absolutePath)))
-      : fileRows;
+    const orderedFileRows = hasAudioFiles ? [...fileRows].sort((a, b) => compareBookFilePaths(a.absolutePath, b.absolutePath)) : fileRows;
     const resolvedChapters = this.resolveChapters(meta?.chapters as AudiobookChapter[] | null | undefined, orderedFileRows);
     const supplementalFields = buildBookDetailSupplementalFields({
       readStatus,
