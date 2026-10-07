@@ -9316,6 +9316,59 @@
       }
     }
   },
+  "metadataReminders": {
+    "title": "Missing-field reminders",
+    "navDescription": "Choose which missing metadata fields you want to see",
+    "personal": "Your preferences",
+    "description": "Choose which missing fields appear in book reminders. These preferences apply across your library and do not change metadata scores.",
+    "sheetDescription": "Choose the fields you care about without leaving this book.",
+    "fieldsHeading": "Fields to check",
+    "autoSave": "Changes save automatically to your account.",
+    "saving": "Saving preferences...",
+    "saved": "Preferences saved.",
+    "reset": "Reset to defaults",
+    "disabled": "No fields selected. Missing-field reminders are hidden.",
+    "saveFailed": "Could not save your preferences. Your previous preferences have been restored.",
+    "customize": "Customize reminders...",
+    "missingHeading": "Missing metadata",
+    "missingDescription": "Missing fields you have chosen to track.",
+    "missingCount": "{count, plural, one {# missing field} other {# missing fields}}",
+    "missingFields": "{count, plural, one {missing field} other {missing fields}}",
+    "fields": {
+      "publisher": {
+        "label": "Publisher",
+        "hint": "The publisher is filled in."
+      },
+      "language": {
+        "label": "Language",
+        "hint": "The language is filled in."
+      },
+      "publication": {
+        "label": "Publication year",
+        "hint": "A publication year or full date is enough."
+      },
+      "pageCount": {
+        "label": "Page count",
+        "hint": "The page count is filled in. Audio-only books are skipped."
+      },
+      "isbn": {
+        "label": "ISBN",
+        "hint": "Either ISBN-10 or ISBN-13 is enough."
+      },
+      "genres": {
+        "label": "Genres",
+        "hint": "At least one genre is filled in."
+      },
+      "tags": {
+        "label": "Tags",
+        "hint": "At least one tag is filled in."
+      },
+      "description": {
+        "label": "Description",
+        "hint": "The description is filled in."
+      }
+    }
+  },
   "metadataScore": {
     "missingFields": "{count, plural, =0 {no fields missing - edit metadata} one {# field missing - edit metadata} other {# fields missing - edit metadata}}"
   },

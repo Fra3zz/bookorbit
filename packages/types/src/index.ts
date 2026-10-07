@@ -50,6 +50,7 @@ export * from "./file-write";
 export * from "./epub";
 export * from "./author";
 export * from "./metadata-score";
+export * from "./metadata-reminders";
 export * from "./book-metadata-fetch";
 export * from "./statistics";
 export * from "./user-list";
