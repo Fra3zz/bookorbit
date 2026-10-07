@@ -215,6 +215,7 @@ describe('FileRenameRepository', () => {
     const setCalls: unknown[] = [];
     const deleteWhere = vi.fn().mockResolvedValue(undefined);
     const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
       select: vi.fn().mockReturnValue({
         from: vi.fn().mockReturnThis(),
         where: vi.fn().mockReturnThis(),
@@ -251,13 +252,14 @@ describe('FileRenameRepository', () => {
       expect.objectContaining({ bookId: 99, libraryFolderId: 7, absolutePath: '/library/Author/Book/old.opf', relPath: 'Author/Book/old.opf' }),
       expect.objectContaining({ primaryFileId: 10, status: 'present' }),
     ]);
-    expect(tx.delete).toHaveBeenCalledTimes(1);
-    expect(deleteWhere).toHaveBeenCalledTimes(1);
+    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(tx.delete).not.toHaveBeenCalled();
   });
 
   it('applyExistingFolderMerge does not replace an existing target primary file', async () => {
     const setCalls: unknown[] = [];
     const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
       select: vi.fn().mockReturnValue({
         from: vi.fn().mockReturnThis(),
         where: vi.fn().mockReturnThis(),

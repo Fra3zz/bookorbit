@@ -2886,7 +2886,13 @@
             "unmatchedDismissed": "Unmatched book dismissed",
             "dismissFailed": "Failed to dismiss unmatched book",
             "allDismissed": "{count, plural, =0 {Dismissed no unmatched books} one {Dismissed # unmatched book} other {Dismissed # unmatched books}}",
-            "dismissAllFailed": "Failed to dismiss all unmatched books"
+            "dismissAllFailed": "Failed to dismiss all unmatched books",
+            "reviewRefreshed": "Books to review refreshed",
+            "reviewRefreshFailed": "Failed to refresh books to review",
+            "reviewDismissed": "Book dismissed from review",
+            "reviewDismissFailed": "Failed to dismiss book from review",
+            "reviewAllDismissed": "{count, plural, =0 {Dismissed no books from review} one {Dismissed # book from review} other {Dismissed # books from review}}",
+            "reviewDismissAllFailed": "Failed to dismiss all books from review"
           },
           "modal": {
             "linkTitle": "Link KOReader book",
@@ -2939,7 +2945,15 @@
           "syncedStatsNote": "Already synced stats will stay on their current BookOrbit book.",
           "chooseDifferent": "Choose different",
           "saving": "Saving...",
-          "confirmLink": "Confirm link"
+          "confirmLink": "Confirm link",
+          "reviewTitle": "KOReader Books to Review",
+          "reviewHint": "Books without an automatic match and books you unlinked appear here. Unlinked books can still sync through an automatic match. Link a book to override that match, or dismiss it to remove it from this list.",
+          "loadingReview": "Loading books to review...",
+          "noReview": "No KOReader books to review.",
+          "manualUnlinkConfirmBody": "Remove the manual link to {title} and return this book to the review list. Future syncs will use an automatic match if one exists. Already synced stats will stay on their current BookOrbit book.",
+          "reviewDismissConfirmBody": "This removes it from your books to review. Automatic matching and existing sync data are kept. If a device reports the hash again without a match, it can reappear.",
+          "reviewDismissAllConfirmTitle": "{count, plural, =0 {No books to review} one {Dismiss all # book to review?} other {Dismiss all # books to review?}}",
+          "reviewDismissAllConfirmBody": "This clears your entire books to review list, including entries on other pages. Automatic matching and existing sync data are kept. If a device reports a hash again without a match, it can reappear."
         },
         "remove": "Remove",
         "removing": "Removing...",

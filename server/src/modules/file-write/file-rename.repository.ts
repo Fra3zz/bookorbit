@@ -1,3 +1,4 @@
+import { deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -241,7 +242,7 @@ export class FileRenameRepository {
           .where(eq(bookFiles.id, update.id));
       }
 
-      await tx.delete(books).where(eq(books.id, input.sourceBookId));
+      await deleteBooksWithHashInvalidation(tx, eq(books.id, input.sourceBookId));
 
       await tx
         .update(books)

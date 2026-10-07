@@ -47,6 +47,7 @@ function makeDb() {
 
   const db: any = {};
   Object.assign(db, {
+    execute: vi.fn().mockResolvedValue(undefined),
     select: vi.fn(() => next('select')),
     insert: vi.fn(() => next('insert')),
     update: vi.fn(() => next('update')),
@@ -321,7 +322,7 @@ describe('ScannerRepository', () => {
     await repo.deleteBookFile(21);
     await repo.updateBookFolderPath(4, '/books/D');
 
-    expect(db.delete).toHaveBeenCalledTimes(1);
+    expect(db.execute).toHaveBeenCalledTimes(1);
     expect(db.update).toHaveBeenCalledTimes(1);
   });
 

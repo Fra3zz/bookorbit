@@ -1,3 +1,4 @@
+import { recordBookFileHashHistory } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, asc, desc, eq, isNull, ne, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -155,7 +156,7 @@ export class FileWriteRepository {
   }
 
   async recordHashHistory(bookFileId: number, fileHash: string, reason: string): Promise<void> {
-    await this.db.insert(schema.bookFileHashHistory).values({ bookFileId, fileHash, reason }).onConflictDoNothing();
+    await recordBookFileHashHistory(this.db, bookFileId, fileHash, reason);
   }
 
   async loadPayload(bookId: number) {

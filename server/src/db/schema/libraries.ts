@@ -85,6 +85,7 @@ export const libraries = pgTable(
     scanMode: varchar('scan_mode', { length: 20 }).notNull().default('auto'),
     pollInterval: integer('poll_interval_seconds').default(300),
 
+    koreaderHashRevision: bigint('koreader_hash_revision', { mode: 'number' }).notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()

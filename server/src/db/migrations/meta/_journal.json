@@ -722,6 +722,13 @@
       "when": 1791126075111,
       "tag": "0102_add_book_journal_and_annotation_stars",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1791330236442,
+      "tag": "0103_fix_kobo_koreader_download_matching",
+      "breakpoints": true
     }
   ]
 }

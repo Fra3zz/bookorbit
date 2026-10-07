@@ -1,3 +1,4 @@
+import { deleteBookFilesWithHashInvalidation, deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, asc, desc, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -401,7 +402,7 @@ export class ScannerRepository {
         .set({ orphaned: true, orphanedHash: file.fileHash })
         .where(and(eq(koreaderDeviceProgress.bookFileId, id), eq(koreaderDeviceProgress.orphaned, false)));
     }
-    await this.db.delete(bookFiles).where(eq(bookFiles.id, id));
+    await deleteBookFilesWithHashInvalidation(this.db, eq(bookFiles.id, id));
   }
 
   async findBookFileWithContextByIno(ino: bigint, libraryId?: number) {
@@ -503,7 +504,7 @@ export class ScannerRepository {
         .limit(1);
       if (!duplicate || duplicate.bookId === input.sourceBookId) return null;
 
-      await tx.delete(books).where(eq(books.id, input.duplicateBookId));
+      await deleteBooksWithHashInvalidation(tx, eq(books.id, input.duplicateBookId));
       await tx
         .update(books)
         .set({
