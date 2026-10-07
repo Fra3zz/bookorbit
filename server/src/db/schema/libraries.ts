@@ -66,6 +66,9 @@ export const libraries = pgTable(
     fileWriteKindleMaxFileSizeMb: integer('file_write_kindle_max_file_size_mb').notNull().default(100),
     fileWriteAudioEnabled: boolean('file_write_audio_enabled').notNull().default(false),
     fileWriteAudioMaxFileSizeMb: integer('file_write_audio_max_file_size_mb').notNull().default(500),
+    fileWriteAllFiles: boolean('file_write_all_files').notNull().default(false),
+    fileWriteReadAlongEnabled: boolean('file_write_read_along_enabled').notNull().default(false),
+    fileWriteReadAlongMaxFileSizeMb: integer('file_write_read_along_max_file_size_mb').notNull().default(1000),
     fileRenameEnabled: boolean('file_rename_enabled').notNull().default(false),
 
     // File naming pattern for uploads (null = use global default)

@@ -3356,7 +3356,15 @@ export class BookService {
       readAloudSync,
       formatPriority: (book.libraries?.formatPriority as string[] | null) ?? [],
       customMetadata,
-      fileWriteStatus: this.fileWriteService?.resolveBookFileWriteStatus(book.libraries, orderedFileRows, book.books.primaryFileId) ?? {
+      fileWriteStatus: this.fileWriteService?.resolveBookFileWriteStatus(
+        book.libraries,
+        // An EPUB inspected for the first time just above has a fresh read-along answer the row lacks.
+        orderedFileRows.map((file) => ({
+          ...file,
+          mediaOverlayAvailable: mediaOverlayByFileId.get(file.id)?.available ?? file.mediaOverlayAvailable,
+        })),
+        book.books.primaryFileId,
+      ) ?? {
         enabled: false,
         reason: 'library_disabled',
         writableFormats: [],

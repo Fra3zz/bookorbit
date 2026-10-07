@@ -257,9 +257,39 @@ describe('LibraryService', () => {
         fileWriteCbxMaxFileSizeMb: 500,
         fileWriteAudioEnabled: true,
         fileWriteAudioMaxFileSizeMb: 500,
+        fileWriteAllFiles: false,
+        fileWriteReadAlongEnabled: false,
+        fileWriteReadAlongMaxFileSizeMb: 1000,
         fileRenameEnabled: false,
       }),
     );
+  });
+
+  it('create stores the all-files write scope when asked', async () => {
+    libraryRepo.findByName.mockResolvedValue([]);
+    libraryRepo.insert.mockResolvedValue([{ id: 5, type: 'books', name: 'Mixed', icon: 'BookOpen' }]);
+    libraryRepo.insertFolders.mockResolvedValue([{ id: 11, path: '/a' }]);
+
+    await service.create({ name: 'Mixed', icon: 'BookOpen', folders: ['/a'], fileWriteAllFiles: true } as any);
+
+    expect(libraryRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ fileWriteAllFiles: true }));
+  });
+
+  it('update leaves the stored all-files write scope alone when the request omits it', async () => {
+    libraryRepo.findById.mockResolvedValue([{ id: 10, name: 'Current', icon: 'BookOpen', watch: false, fileWriteAllFiles: true }]);
+    libraryRepo.update.mockResolvedValue([{ id: 10, name: 'Current', icon: 'BookOpen', watch: false, fileWriteAllFiles: true }]);
+    libraryRepo.findFoldersByLibrary.mockResolvedValue([{ id: 1, path: '/books' }]);
+
+    await service.update(10, { fileWriteEnabled: true } as any);
+
+    expect(libraryRepo.update).toHaveBeenCalledWith(10, { fileWriteEnabled: true });
+  });
+
+  it('update rejects the all-files write scope for podcast libraries', async () => {
+    libraryRepo.findById.mockResolvedValue([{ id: 12, type: 'podcasts', name: 'Podcasts', icon: 'Podcast' }]);
+
+    await expect(service.update(12, { fileWriteAllFiles: true } as any)).rejects.toThrow('fileWriteAllFiles is only supported for book libraries');
+    expect(libraryRepo.update).not.toHaveBeenCalled();
   });
 
   it('create starts watcher immediately when watch is enabled', async () => {

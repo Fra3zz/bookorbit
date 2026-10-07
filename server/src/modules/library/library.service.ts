@@ -79,6 +79,9 @@ const BOOK_ONLY_LIBRARY_FIELDS = [
   'fileWriteKindleMaxFileSizeMb',
   'fileWriteAudioEnabled',
   'fileWriteAudioMaxFileSizeMb',
+  'fileWriteAllFiles',
+  'fileWriteReadAlongEnabled',
+  'fileWriteReadAlongMaxFileSizeMb',
   'fileRenameEnabled',
 ] as const;
 
@@ -212,6 +215,9 @@ export class LibraryService {
       fileWriteKindleMaxFileSizeMb: libraryType === 'books' ? (dto.fileWriteKindleMaxFileSizeMb ?? 100) : 100,
       fileWriteAudioEnabled: libraryType === 'books' ? (dto.fileWriteAudioEnabled ?? true) : false,
       fileWriteAudioMaxFileSizeMb: libraryType === 'books' ? (dto.fileWriteAudioMaxFileSizeMb ?? 500) : 500,
+      fileWriteAllFiles: libraryType === 'books' ? (dto.fileWriteAllFiles ?? false) : false,
+      fileWriteReadAlongEnabled: libraryType === 'books' ? (dto.fileWriteReadAlongEnabled ?? false) : false,
+      fileWriteReadAlongMaxFileSizeMb: libraryType === 'books' ? (dto.fileWriteReadAlongMaxFileSizeMb ?? 1000) : 1000,
       fileRenameEnabled: libraryType === 'books' ? (dto.fileRenameEnabled ?? false) : false,
     });
 

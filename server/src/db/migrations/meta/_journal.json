@@ -729,6 +729,20 @@
       "when": 1791330236442,
       "tag": "0103_fix_kobo_koreader_download_matching",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1791351760200,
+      "tag": "0104_add_library_file_write_all_files",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1791388600818,
+      "tag": "0105_add_library_file_write_read_along",
+      "breakpoints": true
     }
   ]
 }

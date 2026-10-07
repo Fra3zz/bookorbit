@@ -6050,6 +6050,12 @@
         "resume": "Resume",
         "audiobook": "Audiobook",
         "writeTarget": "Write target",
+        "notWritten": {
+          "formatNotSupported": "Not written: unsupported format",
+          "formatDisabled": "Not written: format turned off",
+          "fileExceedsSizeLimit": "Not written: over size limit",
+          "notContentFile": "Not written: not book content"
+        },
         "enabled": "Enabled",
         "disabled": "Off",
         "notSet": "not set",
@@ -9016,12 +9022,22 @@
         },
         "cover": {
           "title": "Include cover image",
-          "hint": "Writes the stored cover back into supported file formats."
+          "hint": "Writes the stored cover back into supported file formats.",
+          "mediumHint": "Writes the stored cover into the file too. Ebook files get the Book cover and audio files get the Audiobook cover; a file whose cover is missing keeps its own."
+        },
+        "allFiles": {
+          "title": "Write into every file of a book",
+          "hint": "Also writes into the book's other book files, such as an audiobook kept beside its ebook or a PDF in the same folder. Every book format there is written, so give a companion file such as a workbook its own folder to keep it out. Format toggles and size limits below still apply. Turning this off stops future writes; it does not undo files already written."
         },
         "epub": {
           "title": "EPUB",
           "hint": "Writes metadata into the OPF file inside the EPUB archive.",
           "toggleAria": "Write EPUB metadata"
+        },
+        "readAlong": {
+          "title": "Read-along EPUB",
+          "hint": "EPUBs with synced narration, such as Storyteller read-alongs. They carry their audio, so they are large and need more memory to rewrite.",
+          "toggleAria": "Write read-along EPUB metadata"
         },
         "fb2": {
           "title": "FictionBook (FB2)",
@@ -9046,7 +9062,9 @@
         "audio": {
           "title": "Audio",
           "hint": "Embeds the stored cover into M4B, M4A, MP3, and FLAC files.",
-          "toggleAria": "Write audio covers"
+          "toggleAria": "Write audio covers",
+          "tagsHint": "Writes tags such as title, authors, narrators, and series into M4B, M4A, MP3, and FLAC files.",
+          "tagsToggleAria": "Write audio metadata"
         },
         "coverAudioHint": "Writes the stored cover into the file too. Audio files can only take a cover.",
         "audioNeedsCover": "Needs “Include cover image” turned on.",

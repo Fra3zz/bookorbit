@@ -40,10 +40,24 @@ export class FileWriteRepository {
         format: bookFiles.format,
         sizeBytes: bookFiles.sizeBytes,
         fileHash: bookFiles.fileHash,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         libraryId: books.libraryId,
+        fileWriteAllFiles: libraries.fileWriteAllFiles,
       })
       .from(books)
       .innerJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))
+      .innerJoin(libraries, eq(libraries.id, books.libraryId))
+      .where(eq(books.id, bookId))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /** The library scope of a book that may have no primary file, which only the all-files mode can still write. */
+  async findFileWriteScopeForBook(bookId: number): Promise<{ libraryId: number; fileWriteAllFiles: boolean } | null> {
+    const [row] = await this.db
+      .select({ libraryId: books.libraryId, fileWriteAllFiles: libraries.fileWriteAllFiles })
+      .from(books)
+      .innerJoin(libraries, eq(libraries.id, books.libraryId))
       .where(eq(books.id, bookId))
       .limit(1);
     return row ?? null;
@@ -79,6 +93,9 @@ export class FileWriteRepository {
         fileWriteKindleMaxFileSizeMb: libraries.fileWriteKindleMaxFileSizeMb,
         fileWriteAudioEnabled: libraries.fileWriteAudioEnabled,
         fileWriteAudioMaxFileSizeMb: libraries.fileWriteAudioMaxFileSizeMb,
+        fileWriteAllFiles: libraries.fileWriteAllFiles,
+        fileWriteReadAlongEnabled: libraries.fileWriteReadAlongEnabled,
+        fileWriteReadAlongMaxFileSizeMb: libraries.fileWriteReadAlongMaxFileSizeMb,
       })
       .from(libraries)
       .where(eq(libraries.id, libraryId))
@@ -94,6 +111,9 @@ export class FileWriteRepository {
         format: bookFiles.format,
         sizeBytes: bookFiles.sizeBytes,
         fileHash: bookFiles.fileHash,
+        role: bookFiles.role,
+        sortOrder: bookFiles.sortOrder,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         libraryId: books.libraryId,
       })
       .from(bookFiles)
