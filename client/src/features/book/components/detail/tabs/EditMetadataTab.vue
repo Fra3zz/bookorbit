@@ -27,6 +27,7 @@ import type {
 } from '@bookorbit/types'
 import { BOOK_FILE_WRITE_FIELD_LABELS, FORMAT_TO_GROUP, getPrimaryBookFile, isValidSeriesIndex, parseSeriesIndex } from '@bookorbit/types'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { api } from '@/lib/api'
 import { metadataScoreColor } from '@/lib/metadata-score-color'
 import ChipInput from '@/components/ui/ChipInput.vue'
@@ -301,7 +302,6 @@ const emptyFields = computed(() => {
   ]
   return checks.filter((check) => !check.filled).map((check) => check.label)
 })
-const emptyFieldsTitle = computed(() => t('book.detail.editMetadata.emptyFieldsTooltip', { fields: formatList(emptyFields.value) }))
 const metadataScore = computed(() => props.book.metadataScore)
 const metadataScoreColour = computed(() => (metadataScore.value == null ? null : metadataScoreColor(metadataScore.value)))
 
@@ -871,17 +871,25 @@ function handleCoverChanged(medium: CoverMedium | null) {
             </span>
           </div>
 
-          <button
-            v-if="emptyFields.length > 0"
-            type="button"
-            class="flex h-9 flex-none items-center gap-1.5 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 px-2.5 text-xs font-semibold text-amber-600 transition-colors hover:bg-amber-500/15 sm:h-8 dark:text-amber-400"
-            :title="emptyFieldsTitle"
-            @click="handleOpenSearch"
-          >
-            <TriangleAlert class="size-3.5 shrink-0" aria-hidden="true" />
-            <span>{{ emptyFields.length }}</span>
-            <span class="hidden @3xl/edit:inline">{{ t('book.detail.editMetadata.emptyFields', { count: emptyFields.length }) }}</span>
-          </button>
+          <Popover v-if="emptyFields.length > 0">
+            <PopoverTrigger as-child>
+              <button
+                type="button"
+                class="flex h-9 flex-none items-center gap-1.5 rounded-lg border border-dashed border-warning/40 bg-warning/10 px-2.5 text-xs font-semibold text-foreground transition-colors hover:bg-warning/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-8"
+                :aria-label="t('book.detail.editMetadata.emptyFieldsCount', { count: emptyFields.length })"
+              >
+                <TriangleAlert class="size-3.5 shrink-0 text-warning" aria-hidden="true" />
+                <span>{{ emptyFields.length }}</span>
+                <span class="hidden @3xl/edit:inline">{{ t('book.detail.editMetadata.emptyFields', { count: emptyFields.length }) }}</span>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" class="w-64 max-w-[calc(100vw-2rem)] p-3" :aria-label="t('book.detail.editMetadata.emptyFieldsHeading')">
+              <p class="mb-2 text-sm font-semibold">{{ t('book.detail.editMetadata.emptyFieldsHeading') }}</p>
+              <ul class="grid gap-1 text-sm text-muted-foreground">
+                <li v-for="field in emptyFields" :key="field">{{ field }}</li>
+              </ul>
+            </PopoverContent>
+          </Popover>
 
           <div class="flex-1" />
 

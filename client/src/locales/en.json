@@ -5730,6 +5730,9 @@
         },
         "searchDrawer": {
           "searchTitle": "Search Metadata",
+          "autoSearchOnOpen": "Search automatically when opened",
+          "autoSearchOnOpenHint": "Uses the book's details next time this panel opens. Remembered for your account in this browser.",
+          "searchOptions": "Search options",
           "compareTitle": "Compare Metadata",
           "searchSubtitle": "Find the best provider match for this book.",
           "compareSubtitle": "Review differences and apply only what you want."
@@ -5949,6 +5952,8 @@
         "score": "Score",
         "scoreTooltip": "Metadata score {score} out of 100",
         "emptyFields": "{count, plural, one {empty field} other {empty fields}}",
+        "emptyFieldsCount": "{count, plural, one {# empty field} other {# empty fields}}",
+        "emptyFieldsHeading": "Empty metadata fields",
         "emptyFieldsTooltip": "Not filled in yet: {fields}. Search online to look them up.",
         "libraryRow": "Library",
         "primaryRow": "Primary",

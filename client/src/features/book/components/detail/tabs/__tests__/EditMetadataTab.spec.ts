@@ -153,6 +153,36 @@ describe('EditMetadataTab cover tiles', () => {
     })
   })
 
+  it('opens a popover listing only empty fields without opening metadata search', async () => {
+    const wrapper = mountTab(makeBook({ publisher: 'Ace', publishedYear: 1965 }))
+    document.body.append(wrapper.element)
+    await flushPromises()
+
+    const badge = wrapper.get('[aria-label="book.detail.editMetadata.emptyFieldsCount"]')
+    await badge.trigger('click')
+    await flushPromises()
+
+    const popover = document.querySelector('[data-slot="popover-content"]')!
+    expect(popover).not.toBeNull()
+    expect(Array.from(popover.querySelectorAll('li'), (item) => item.textContent)).toEqual([
+      'book.detail.editMetadata.languageLabel',
+      'book.detail.editMetadata.pageCountLabel',
+      'book.detail.editMetadata.isbn13Label',
+      'book.detail.editMetadata.isbn10Label',
+      'book.detail.editMetadata.genresLabel',
+      'book.detail.editMetadata.tagsLabel',
+      'book.detail.editMetadata.descriptionLabel',
+    ])
+    expect(badge.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.findComponent(MetadataSearchDrawerStub).exists()).toBe(false)
+    expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes('/metadata-fetch/stream'))).toBe(false)
+
+    await wrapper.setProps({ book: makeBook({ publisher: 'Ace', publishedYear: 1965, language: 'en' }) })
+    await flushPromises()
+    expect(popover.textContent).not.toContain('book.detail.editMetadata.languageLabel')
+    wrapper.unmount()
+  })
+
   it('enables Save when the only change is an unsaved cover', async () => {
     const wrapper = mountTab(makeBook())
     await flushPromises()
