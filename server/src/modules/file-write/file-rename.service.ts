@@ -8,6 +8,7 @@ import { NotificationType, resolveUploadPath, sanitizePathSegment } from '@booko
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
+import { resolveSingleFileBookPath } from '../../common/utils/book-path.utils';
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import type { BookCoverSlotRow } from '../book-cover-store/book-cover-store.repository';
 import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
@@ -156,6 +157,7 @@ export class FileRenameService implements OnModuleDestroy {
 
     const newAbsolutePath = fileTargets.get(data.file.id) ?? baseNewAbsolutePath;
     const newFolderPath = dirname(newAbsolutePath);
+    const newBookPath = isBookPerFolder ? resolveSingleFileBookPath(newAbsolutePath, data.libraryFolderPath, data.organizationMode) : newAbsolutePath;
 
     let pathUnchanged = newAbsolutePath === currentAbsolutePath;
     if (pathUnchanged) {
@@ -174,7 +176,7 @@ export class FileRenameService implements OnModuleDestroy {
     }
 
     let mergeTargetBookId: number | null = null;
-    if (isBookPerFolder && newFolderPath !== currentFolderPath) {
+    if (isBookPerFolder && newBookPath === newFolderPath && newFolderPath !== currentFolderPath) {
       const owner = (await this.renameRepo.findFolderOwners(data.libraryId, [newFolderPath])).get(newFolderPath);
       if (owner && owner.bookId !== bookId) {
         const sameWork = isSameWork({ title: data.metadata.title, primaryAuthor: data.authors[0] ?? null }, owner);
@@ -263,8 +265,7 @@ export class FileRenameService implements OnModuleDestroy {
           await this.renameBookWithFolder(bookId, data, currentFolderPath, newFolderPath, fileTargets, sanitizeForCrossPlatform);
         }
       } else {
-        const nextBookFolderPath = isBookPerFolder ? newFolderPath : newAbsolutePath;
-        await this.renameBookFilesOnly(bookId, data, fileTargets, nextBookFolderPath, sanitizeForCrossPlatform);
+        await this.renameBookFilesOnly(bookId, data, fileTargets, newBookPath, sanitizeForCrossPlatform);
       }
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';

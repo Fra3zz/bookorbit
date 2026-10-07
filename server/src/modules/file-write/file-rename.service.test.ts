@@ -1160,6 +1160,29 @@ describe('FileRenameService', () => {
     expect(mockRename).toHaveBeenCalledWith('/library/Frank Herbert/Dune/Dune.epub', '/library/Frank Herbert/Dune.epub');
   });
 
+  it.each(['book_per_folder', 'book_per_file'])('preserves a root file identity after renaming in %s mode', async (organizationMode) => {
+    const { service, renameRepo } = makeService();
+    renameRepo.findBookRenameData.mockResolvedValue(
+      makeRenameData({
+        organizationMode,
+        fileNamingPattern: '{title}',
+        file: { absolutePath: '/library/Old Title.epub', relPath: 'Old Title.epub' },
+        bookFolderPath: '/library/Old Title.epub',
+      }),
+    );
+
+    const result = await service.performRename(5, 12);
+
+    expect(result).toMatchObject({ status: 'success', newPath: '/library/Dune.epub' });
+    expect(renameRepo.applyFolderRename).toHaveBeenCalledWith(
+      5,
+      [{ id: 10, absolutePath: '/library/Dune.epub', relPath: 'Dune.epub' }],
+      '/library/Dune.epub',
+    );
+    expect(renameRepo.findFolderOwners).not.toHaveBeenCalled();
+    expect(mockRename).toHaveBeenCalledWith('/library/Old Title.epub', '/library/Dune.epub');
+  });
+
   it('moves a flat file into a new per-book folder when bookFolderPath equals the file path', async () => {
     const { service, renameRepo } = makeService();
     renameRepo.findBookRenameData.mockResolvedValue(

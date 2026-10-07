@@ -29,6 +29,7 @@ import { parsePdfFile, type PdfParseWarning } from '../metadata/lib/pdf-parser';
 import { extractAudioMetadata } from '../metadata/extractors/audio.extractor';
 import { computeFileHash } from '../scanner/lib/hash';
 import { resolveExistingPathSpelling } from '../../common/utils/path-identity.utils';
+import { resolveSingleFileBookPath } from '../../common/utils/book-path.utils';
 import { inspectEpubMediaOverlayFields, mediaOverlayCapabilityFromFields } from '../reader/epub/epub-media-overlay-capability';
 import { PathPolicyService } from '../path/path-policy.service';
 import { FORMATS_WITH_UNBOUNDED_METADATA_READS, MAX_BUFFERED_METADATA_BYTES } from '../../common/constants/upload.constants';
@@ -426,7 +427,7 @@ export class UploadService {
 
       if (resolved) {
         const absolutePath = join(libraryFolderPath, resolved);
-        return { absolutePath, bookFolderPath: isBookPerFile ? absolutePath : dirname(absolutePath) };
+        return { absolutePath, bookFolderPath: resolveSingleFileBookPath(absolutePath, libraryFolderPath, library.organizationMode) };
       }
     }
 
