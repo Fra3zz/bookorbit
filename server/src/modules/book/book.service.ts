@@ -1,3 +1,4 @@
+import { ReadingAttemptEventsService } from '../user-book-status/reading-attempt-events.service';
 import {
   BadRequestException,
   ForbiddenException,
@@ -306,6 +307,7 @@ export class BookService {
     @Optional() private readonly audiobookEbookProgressSync?: AudiobookEbookProgressSyncService,
     @Optional() private readonly audiolessEpubService?: AudiolessEpubService,
     @Optional() private readonly coverReconciler?: CoverSlotReconciler,
+    @Optional() private readonly readingAttemptEvents?: ReadingAttemptEventsService,
   ) {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
@@ -1667,6 +1669,7 @@ export class BookService {
         }
 
         await this.bookRepo.deleteByIdsAndInvalidateScanState(deletedBookIds);
+        this.readingAttemptEvents?.notifyChanged(null);
       });
       // Cover cleanup cannot resurrect a book and must not turn a committed deletion into a
       // failure. Leave covers alone until the database transaction has succeeded.

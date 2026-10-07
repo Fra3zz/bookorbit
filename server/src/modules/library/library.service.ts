@@ -1,3 +1,4 @@
+import { ReadingAttemptEventsService } from '../user-book-status/reading-attempt-events.service';
 import {
   BadRequestException,
   ConflictException,
@@ -97,6 +98,7 @@ export class LibraryService {
     private readonly achievementEvents: AchievementEventsService,
     private readonly pathPolicy: PathPolicyService,
     private readonly scanScheduler: LibraryScanSchedulerService,
+    private readonly readingAttemptEvents: ReadingAttemptEventsService,
   ) {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
@@ -348,6 +350,7 @@ export class LibraryService {
       const removedPodcastFiles = existing.type === 'podcasts' ? await this.removePodcastFiles(id) : 0;
       if (existing.type === 'podcasts') await this.removePodcastAppDataFiles(id);
       await this.libraryRepo.delete(id);
+      this.readingAttemptEvents.notifyChanged(null);
       this.scanScheduler.removeSchedule(id);
       await this.cleanupCoverDirectories(bookRows.map(({ id: bookId }) => bookId));
       this.logger.log(

@@ -1,3 +1,4 @@
+import { ReadingAttemptEventsService } from '../user-book-status/reading-attempt-events.service';
 import { BadRequestException, ConflictException, ForbiddenException, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import type { MockedFunction } from 'vitest';
 import { rm, stat, rename } from 'fs/promises';
@@ -277,6 +278,7 @@ function makeService(overrides: { bookMetadataLockService?: unknown; appDataPath
 
   bookRepo.withTransaction.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => callback({}));
   const selfWriteRegistry = new SelfWriteRegistry();
+  const readingEvents = new ReadingAttemptEventsService();
 
   const service = new BookService(
     bookRepo as never,
@@ -299,10 +301,17 @@ function makeService(overrides: { bookMetadataLockService?: unknown; appDataPath
     fileWriteService as never,
     fileRenameService as never,
     achievementEvents as never,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    readingEvents,
   );
 
   return {
     service,
+    readingEvents,
     bookRepo,
     libraryService,
     queryBuilder,
@@ -2840,7 +2849,7 @@ describe('BookService', () => {
     });
 
     it('deletes books through the scan-state-aware repository transaction', async () => {
-      const { service, bookRepo } = makeService();
+      const { service, bookRepo, readingEvents } = makeService();
       const user = makeUser();
 
       bookRepo.findLibraryIdsByBookIds.mockResolvedValue([{ id: 3, libraryId: 7 }]);
@@ -2848,13 +2857,19 @@ describe('BookService', () => {
       bookRepo.findAllFilesByBookIds.mockResolvedValue([]);
       bookRepo.deleteByIdsAndInvalidateScanState.mockResolvedValue(undefined);
 
+      const notify = vi.spyOn(readingEvents, 'notifyChanged');
+      bookRepo.deleteByIdsAndInvalidateScanState.mockImplementation(() => {
+        expect(notify).not.toHaveBeenCalled();
+        return Promise.resolve();
+      });
       await service.deleteBooks([3], user);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(null);
 
       expect(bookRepo.deleteByIdsAndInvalidateScanState).toHaveBeenCalledWith([3]);
     });
 
     it('does not commit book deletion when scan state invalidation fails', async () => {
-      const { service, bookRepo } = makeService();
+      const { service, bookRepo, readingEvents } = makeService();
       const user = makeUser();
       const warnSpy = vi.spyOn((service as unknown as { logger: { warn: (message: string) => void } }).logger, 'warn').mockImplementation();
 
@@ -2863,7 +2878,9 @@ describe('BookService', () => {
       bookRepo.findAllFilesByBookIds.mockResolvedValue([]);
       bookRepo.deleteByIdsAndInvalidateScanState.mockRejectedValue(new Error('db down'));
 
+      const notify = vi.spyOn(readingEvents, 'notifyChanged');
       await expect(service.deleteBooks([3], user)).rejects.toThrow('db down');
+      expect(notify).not.toHaveBeenCalled();
       expect(warnSpy).toHaveBeenCalled();
       expect(mockRm).not.toHaveBeenCalled();
     });

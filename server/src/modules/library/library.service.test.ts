@@ -1,3 +1,4 @@
+import { ReadingAttemptEventsService } from '../user-book-status/reading-attempt-events.service';
 vi.mock('fs/promises', () => ({
   readdir: vi.fn(),
   realpath: vi.fn(),
@@ -96,10 +97,12 @@ describe('LibraryService', () => {
   };
 
   let service: LibraryService;
+  let readingEvents: ReadingAttemptEventsService;
 
   beforeEach(() => {
     vi.resetAllMocks();
     config.get.mockReturnValue('/books');
+    readingEvents = new ReadingAttemptEventsService();
     service = new LibraryService(
       libraryRepo as any,
       config as any,
@@ -109,6 +112,7 @@ describe('LibraryService', () => {
       achievementEvents as any,
       pathPolicy as any,
       scanScheduler as any,
+      readingEvents,
     );
 
     libraryRepo.findPodcastIds.mockResolvedValue([]);
@@ -623,13 +627,27 @@ describe('LibraryService', () => {
     libraryRepo.findById.mockResolvedValue([{ id: 4, name: 'L' }]);
     libraryRepo.findBookIdsByLibrary.mockResolvedValue([{ id: 101 }, { id: 102 }]);
 
+    const notify = vi.spyOn(readingEvents, 'notifyChanged');
+    libraryRepo.delete.mockImplementation(() => {
+      expect(notify).not.toHaveBeenCalled();
+      return Promise.resolve();
+    });
     await service.remove(4);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(null);
 
     expect(fileWatcherService.stopWatcher).toHaveBeenCalledWith(4);
     expect(libraryRepo.delete).toHaveBeenCalledWith(4);
     expect(scanScheduler.removeSchedule).toHaveBeenCalledWith(4);
     expect(mockRm).toHaveBeenCalledWith('/books/covers/101', { recursive: true, force: true });
     expect(mockRm).toHaveBeenCalledWith('/books/covers/102', { recursive: true, force: true });
+  });
+
+  it('does not invalidate reading caches when deleting the library fails', async () => {
+    libraryRepo.findBookIdsByLibrary.mockResolvedValue([]);
+    libraryRepo.delete.mockRejectedValueOnce(new Error('Delete failed'));
+    const notify = vi.spyOn(readingEvents, 'notifyChanged');
+    await expect(service.remove(1)).rejects.toThrow('Delete failed');
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it('remove deletes downloaded podcast files before deleting the library', async () => {
