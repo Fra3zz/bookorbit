@@ -150,6 +150,31 @@ describe('Bulk file rename (e2e)', { timeout: SUITE_TIMEOUT_MS }, () => {
       }
     });
 
+    it.each([
+      { isbn10: '0306406152', isbn13: null, expected: '0306406152' },
+      { isbn10: '0306406152', isbn13: '9780306406157', expected: '9780306406157' },
+    ])('renames using the available ISBN ($expected) without changing its field', async ({ isbn10, isbn13, expected }) => {
+      const lib = await createLibrary(ctx, { mode: 'book_per_file', fileRenameEnabled: true, fileNamingPattern: '{isbn}' });
+      await createEpubFile(join(lib.folderPath, 'isbn-source.epub'));
+      await triggerAndWaitForScan(ctx, lib.libraryId);
+      const [book] = await findAllBooksInLibrary(ctx, lib.libraryId);
+      await setBookMetadata(ctx, book.bookId, { isbn10, isbn13 });
+
+      const preview = await getBulkRenamePreview(ctx, lib.libraryId);
+      expect(preview.items).toHaveLength(1);
+      expect(preview.items[0].status).toBe('will_rename');
+
+      const result = await executeBulkRename(ctx, lib.libraryId);
+      expect(getDoneEvent(result.events)).toMatchObject({ succeeded: 1, failed: 0 });
+      await expect(pathExists(join(lib.folderPath, `${expected}.epub`))).resolves.toBe(true);
+      expect((await findAllBooksInLibrary(ctx, lib.libraryId))[0].relPath).toBe(`${expected}.epub`);
+      const [metadata] = await ctx.db
+        .select({ isbn10: schema.bookMetadata.isbn10, isbn13: schema.bookMetadata.isbn13 })
+        .from(schema.bookMetadata)
+        .where(eq(schema.bookMetadata.bookId, book.bookId));
+      expect(metadata).toEqual({ isbn10, isbn13 });
+    });
+
     it('reports unchanged for books already at the correct path', async () => {
       const lib = await createLibrary(ctx, {
         mode: 'book_per_file',

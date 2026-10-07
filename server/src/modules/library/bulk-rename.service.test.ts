@@ -26,6 +26,7 @@ function makeBookData(overrides: Partial<BulkRenameBookData> & { bookId?: number
       subtitle: null,
       publisher: null,
       language: null,
+      isbn10: null,
       isbn13: null,
       publishedYear: null,
       seriesName: null,

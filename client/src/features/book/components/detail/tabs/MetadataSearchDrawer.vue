@@ -50,7 +50,7 @@ const mainCoverUrl = computed(() => slotCoverUrl(mainCoverMedium.value))
 const searchDefaults = computed(() => ({
   title: props.book.title ?? undefined,
   author: props.book.authors[0]?.name ?? undefined,
-  isbn: props.book.isbn13 ?? props.book.isbn10 ?? undefined,
+  isbn: props.book.isbn13?.trim() || props.book.isbn10?.trim() || undefined,
 }))
 
 const currentSource = computed<MetadataSource>(() => ({

@@ -349,6 +349,8 @@ export type BookMetadataSaveResult = {
 };
 
 export type BookMetadataRefreshPreviewFields = {
+  isbn10?: string | null;
+  isbn13?: string | null;
   title?: string | null;
   subtitle?: string | null;
   description?: string | null;

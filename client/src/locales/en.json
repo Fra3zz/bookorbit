@@ -1570,6 +1570,7 @@
         "publishedYear": "Published year",
         "language": "Language",
         "pageCount": "Page count",
+        "isbn": "ISBNs",
         "communityRating": "Community rating",
         "seriesName": "Series name",
         "seriesIndex": "Series index",

@@ -68,7 +68,6 @@ import type {
   JumpBucketsResponse,
   JumpBucketsQuery,
   MetadataFetchDiagnostics,
-  MetadataField,
   ReadStatus,
   ReadAloudProgressSync,
   ReadAloudProgressSyncMode,
@@ -87,7 +86,8 @@ import { MetadataService } from '../metadata/metadata.service';
 import { MetadataScoreService } from '../metadata-score/metadata-score.service';
 import { LibraryService } from '../library/library.service';
 import { books } from '../../db/schema';
-import { MetadataFetchPipeline, ResolvedMetadataFields } from '../metadata-fetch/metadata-fetch-pipeline';
+import { ExistingMetadataFields, MetadataFetchPipeline, ResolvedMetadataFields } from '../metadata-fetch/metadata-fetch-pipeline';
+import { splitMetadataIsbn } from '../../common/text-match/isbn-normalize';
 import type { MetadataSearchParams } from '../metadata-fetch/providers/metadata-search-params';
 import { FileRenameService, RENAME_RELEVANT_FIELDS } from '../file-write/file-rename.service';
 import { FileWriteService } from '../file-write/file-write.service';
@@ -426,6 +426,8 @@ export class BookService {
     if (r.publishedYear !== undefined) preview.publishedYear = r.publishedYear as number | null;
     if (r.language !== undefined) preview.language = r.language as string | null;
     if (r.pageCount !== undefined) preview.pageCount = r.pageCount as number | null;
+    if (r.isbn10 !== undefined) preview.isbn10 = r.isbn10 as string;
+    if (r.isbn13 !== undefined) preview.isbn13 = r.isbn13 as string;
     if (r.communityRatings !== undefined) preview.communityRatings = r.communityRatings as BookCommunityRating[];
     if (r.seriesName !== undefined) preview.seriesName = r.seriesName as string | null;
     if (r.seriesIndex !== undefined) preview.seriesIndex = r.seriesIndex as string | null;
@@ -2885,7 +2887,7 @@ export class BookService {
       const searchParams: MetadataSearchParams = {
         title: meta?.title ?? undefined,
         author: authorRows[0]?.name ?? undefined,
-        isbn: meta?.isbn13 ?? meta?.isbn10 ?? undefined,
+        isbn: meta?.isbn13?.trim() || meta?.isbn10?.trim() || undefined,
         seriesName: meta?.seriesName ?? undefined,
         seriesIndex: meta?.seriesIndex ?? undefined,
         existingProviderIds: providerIds,
@@ -2894,7 +2896,7 @@ export class BookService {
         maxCandidatesPerProvider: 1,
       };
 
-      const existingFields: Partial<Record<MetadataField, unknown>> = {
+      const existingFields: ExistingMetadataFields = {
         title: meta?.title,
         subtitle: meta?.subtitle,
         description: meta?.description,
@@ -2903,6 +2905,8 @@ export class BookService {
         publishedYear: meta?.publishedYear,
         language: meta?.language,
         pageCount: meta?.pageCount,
+        isbn10: meta?.isbn10,
+        isbn13: meta?.isbn13,
         communityRating: communityRatingRows,
         seriesName: meta?.seriesName,
         seriesIndex: meta?.seriesIndex,
@@ -2910,6 +2914,7 @@ export class BookService {
         duration: meta?.durationSeconds ?? undefined,
         abridged: meta?.abridged ?? undefined,
       };
+      if (meta?.lockedFields?.length) existingFields.lockedFields = meta.lockedFields;
       const coverState = await this.coverStore.fetchState(id);
       if (!coverState) throw new NotFoundException(`Book ${id} not found`);
       const coverInputs = coverFetchInputs(coverState);
@@ -2948,6 +2953,8 @@ export class BookService {
       if (r.publishedYear !== undefined) dto.publishedYear = r.publishedYear as number | null;
       if (r.language !== undefined) dto.language = r.language as string | null;
       if (r.pageCount !== undefined) dto.pageCount = r.pageCount as number | null;
+      if (r.isbn10 !== undefined) dto.isbn10 = r.isbn10 as string;
+      if (r.isbn13 !== undefined) dto.isbn13 = r.isbn13 as string;
       if (r.communityRatings !== undefined) dto.communityRatings = r.communityRatings as UpdateBookMetadataDto['communityRatings'];
       if (r.seriesName !== undefined) dto.seriesName = r.seriesName as string | null;
       if (r.seriesIndex !== undefined) dto.seriesIndex = r.seriesIndex as string | null;
@@ -3605,7 +3612,7 @@ export class BookService {
           publishedDate,
           publishedYear: year,
           language: parsed.language,
-          isbn13: parsed.isbn,
+          ...splitMetadataIsbn(parsed.isbn),
           authors: parsed.authors.length > 0 ? parsed.authors : undefined,
           genres: parsed.tags.length > 0 ? parsed.tags : undefined,
         };

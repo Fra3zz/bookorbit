@@ -56,6 +56,7 @@ describe('FileRenameService', () => {
         subtitle: null,
         publisher: 'Ace',
         language: 'en',
+        isbn10: null,
         isbn13: '9780441172719',
         publishedYear: 1965,
         seriesName: null,
@@ -181,6 +182,15 @@ describe('FileRenameService', () => {
 
     await expect(service.performRename(5, 12)).resolves.toEqual(expect.objectContaining({ status: 'skipped', reason: 'disabled' }));
     expect(notificationService.notify).not.toHaveBeenCalled();
+  });
+
+  it('uses ISBN-10 in the naming pattern when ISBN-13 is absent', async () => {
+    const { service, renameRepo } = makeService();
+    renameRepo.findBookRenameData.mockResolvedValue(
+      makeRenameData({ fileNamingPattern: '{isbn}', metadata: { isbn10: '0306406152', isbn13: null } }),
+    );
+
+    await expect(service.performRename(5, 12)).resolves.toEqual(expect.objectContaining({ status: 'success', newPath: '/library/0306406152.epub' }));
   });
 
   it('skips and notifies when another book already owns the target path', async () => {

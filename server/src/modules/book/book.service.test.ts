@@ -989,10 +989,10 @@ describe('BookService', () => {
         fileRows: [{ format: 'epub', role: 'primary', mediaOverlayAvailable: false }],
       });
       pipeline.runWithSources.mockResolvedValue({
-        resolved: { title: 'New Title' },
+        resolved: { title: 'New Title', isbn10: '0306406152', isbn13: '9780306406157' },
         sources: {},
         providerIds: {},
-        diagnostics: makeMetadataFetchDiagnostics({ resolvedFieldCount: 1 }),
+        diagnostics: makeMetadataFetchDiagnostics({ resolvedFieldCount: 3 }),
       });
       coverStore.fetchState.mockResolvedValue({ media: { hasEbook: true, hasAudio: false }, filled: { ebook: true, audio: false }, locked: [] });
       const updateSpy = vi.spyOn(service, 'updateMetadata');
@@ -1001,8 +1001,8 @@ describe('BookService', () => {
 
       expect(coverStore.fetchState).toHaveBeenCalledWith(1);
       expect(result).toEqual({
-        metadata: { title: 'New Title' },
-        diagnostics: makeMetadataFetchDiagnostics({ resolvedFieldCount: 1 }),
+        metadata: { title: 'New Title', isbn10: '0306406152', isbn13: '9780306406157' },
+        diagnostics: makeMetadataFetchDiagnostics({ resolvedFieldCount: 3 }),
       });
       expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 7, false);
       expect(pipeline.runWithSources).toHaveBeenCalledWith(
@@ -1027,6 +1027,8 @@ describe('BookService', () => {
           language: null,
           pageCount: null,
           communityRating: [],
+          isbn10: null,
+          isbn13: '978123',
           seriesName: null,
           seriesIndex: null,
           genres: [],
@@ -1054,7 +1056,7 @@ describe('BookService', () => {
         genreRows: [],
       });
       pipeline.runWithSources.mockResolvedValue({
-        resolved: { title: 'Resolved', authors: ['A'], genres: ['G'], coverUrl: 'https://img/c.jpg' },
+        resolved: { title: 'Resolved', authors: ['A'], genres: ['G'], isbn10: '0306406152', isbn13: '9780306406157', coverUrl: 'https://img/c.jpg' },
         sources: {},
         providerIds: {},
       });
@@ -1068,7 +1070,12 @@ describe('BookService', () => {
 
       const result = await service.refreshMetadata(1, false, user);
 
-      expect(updateSpy).toHaveBeenCalledWith(1, { title: 'Resolved', authors: ['A'], genres: ['G'] }, user, { postSaveMode: 'schedule' });
+      expect(updateSpy).toHaveBeenCalledWith(
+        1,
+        { title: 'Resolved', authors: ['A'], genres: ['G'], isbn10: '0306406152', isbn13: '9780306406157' },
+        user,
+        { postSaveMode: 'schedule' },
+      );
       expect(metadataService.downloadAndSaveCover).toHaveBeenCalledWith([{ url: 'https://img/c.jpg' }], 1, 'ebook');
       expect(getDetailSpy).toHaveBeenCalledWith(1, user);
       expect(result).toEqual({ id: 1, title: 'Final' });
@@ -5153,7 +5160,7 @@ describe('BookService', () => {
         publisher: 'Mobi Pub',
         publishedDate: '2001-02-03',
         language: 'en',
-        isbn: '9781111111111',
+        isbn: '0-9752298-0-x',
         authors: ['Mobius'],
         tags: ['Adventure'],
       } as never);
@@ -5190,6 +5197,7 @@ describe('BookService', () => {
         expect.objectContaining({
           title: 'Mobi Title',
           publishedYear: 2001,
+          isbn10: '097522980X',
           authors: ['Mobius'],
         }),
       );

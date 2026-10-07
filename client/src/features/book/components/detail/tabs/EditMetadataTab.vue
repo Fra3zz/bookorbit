@@ -714,6 +714,8 @@ function showSaveResultToast(write: WriteResult | null, libraryAutoWriteEnabled:
 
 function buildPreviewPatch(preview: MetadataRefreshPreview): MetadataPatch {
   return {
+    isbn10: preview.isbn10,
+    isbn13: preview.isbn13,
     title: preview.title,
     subtitle: preview.subtitle,
     description: preview.description,

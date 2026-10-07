@@ -198,6 +198,54 @@ describe('EditMetadataTab cover tiles', () => {
     expect(saveButton(wrapper).attributes('disabled')).toBeUndefined()
   })
 
+  it('applies preview ISBNs to the editor and saves them only after Save', async () => {
+    vi.mocked(api).mockImplementation(async (url, init) => {
+      if (String(url).includes('/refresh-metadata?preview=true')) {
+        return json({
+          metadata: { isbn10: '0306406152', isbn13: '9780306406157' },
+          diagnostics: { candidateProviders: ['google'], enabledUnreferencedProviders: [] },
+        })
+      }
+      if (init?.method === 'PATCH') return json({ book: savedBook, write: null, libraryAutoWriteEnabled: false })
+      if (String(url).includes('/metadata-fetch/providers')) return json([])
+      return json({})
+    })
+    const wrapper = mountTab(makeBook())
+    await flushPromises()
+    const autoFillButton = wrapper.findAll('button').find((button) => button.text().includes('book.detail.editMetadata.autoFill'))!
+    await autoFillButton.trigger('click')
+    await flushPromises()
+    expect(patchCalls()).toHaveLength(0)
+    expect((wrapper.get('[data-field="isbn10"] input').element as HTMLInputElement).value).toBe('0306406152')
+    expect((wrapper.get('[data-field="isbn13"] input').element as HTMLInputElement).value).toBe('9780306406157')
+    await saveButton(wrapper).trigger('click')
+    await flushPromises()
+    const body = JSON.parse(patchCalls()[0]![1]!.body as string)
+    expect(body.metadata).toMatchObject({ isbn10: '0306406152', isbn13: '9780306406157' })
+  })
+
+  it.each(['isbn10', 'isbn13'] as const)('preserves the %s lock when applying preview ISBNs', async (lockedField) => {
+    vi.mocked(api).mockImplementation(async (url) => {
+      if (String(url).includes('/refresh-metadata?preview=true')) {
+        return json({
+          metadata: { isbn10: '0306406152', isbn13: '9780306406157' },
+          diagnostics: { candidateProviders: ['google'], enabledUnreferencedProviders: [] },
+        })
+      }
+      if (String(url).includes('/metadata-fetch/providers')) return json([])
+      return json({})
+    })
+    const wrapper = mountTab(makeBook({ lockedFields: [lockedField] }))
+    await flushPromises()
+    await wrapper.get('[aria-label="book.detail.editMetadata.autoFill"]').trigger('click')
+    await flushPromises()
+    expect((wrapper.get(`[data-field="${lockedField}"] input`).element as HTMLInputElement).value).toBe('')
+    const unlockedField = lockedField === 'isbn10' ? 'isbn13' : 'isbn10'
+    expect((wrapper.get(`[data-field="${unlockedField}"] input`).element as HTMLInputElement).value).toBe(
+      unlockedField === 'isbn10' ? '0306406152' : '9780306406157',
+    )
+  })
+
   it('opens reminder preferences from the popover without leaving the unsaved book form', async () => {
     const wrapper = mountTab(makeBook())
     document.body.append(wrapper.element)

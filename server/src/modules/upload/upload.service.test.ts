@@ -610,6 +610,30 @@ describe('UploadService', () => {
     expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Stephen King/The Stand.mobi');
   });
 
+  it.each(['9780385121682', '097522980X'])('mobi metadata populates the ISBN naming token: %s', async (isbn) => {
+    validator.validateFormat.mockReturnValue('mobi');
+    validator.sanitizeFilename.mockReturnValue('book.mobi');
+    db.select
+      .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['mobi'], fileNamingPattern: '{authors:first}/{title}-{isbn}.{extension}' }]))
+      .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+    mockParseMobiFile.mockResolvedValue({
+      title: 'The Stand',
+      authors: ['Stephen King'],
+      publisher: 'Doubleday',
+      isbn,
+      publishedDate: '1978-10-03',
+      language: 'en',
+      description: null,
+      tags: [],
+    });
+    storage.streamToTemp.mockResolvedValue({ tempPath: 'upload.bin', sizeBytes: 456 });
+
+    const result = await service.upload(1, 2, 'raw.mobi', {} as any, user);
+
+    expect(result.filename).toBe(`The Stand-${isbn}.mobi`);
+    expect(storage.moveToPath.mock.lastCall?.[1]).toBe(`/library/Stephen King/The Stand-${isbn}.mobi`);
+  });
+
   it('pdf metadata populates tokens', async () => {
     validator.validateFormat.mockReturnValue('pdf');
     validator.sanitizeFilename.mockReturnValue('doc.pdf');

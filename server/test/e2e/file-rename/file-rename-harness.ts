@@ -248,6 +248,7 @@ export async function setBookMetadata(
     seriesName?: string | null;
     seriesIndex?: string | null;
     language?: string | null;
+    isbn10?: string | null;
     isbn13?: string | null;
     authors?: string[];
   },
@@ -264,6 +265,7 @@ export async function setBookMetadata(
       ...(metadata.seriesName !== undefined && { seriesName: metadata.seriesName }),
       ...(metadata.seriesIndex !== undefined && { seriesIndex: metadata.seriesIndex }),
       ...(metadata.language !== undefined && { language: metadata.language }),
+      ...(metadata.isbn10 !== undefined && { isbn10: metadata.isbn10 }),
       ...(metadata.isbn13 !== undefined && { isbn13: metadata.isbn13 }),
       ...(metadata.authors !== undefined && { authors: metadata.authors }),
     },
