@@ -1,13 +1,36 @@
 ARG NODE_IMAGE=node:26.8.1-alpine3.23@sha256:871eb674ad6e692c91330a8959f1ce2f80ba3f445cdc54e306869d2ea265e42d
 
-# Build kepubify from source with a current Go toolchain so the Go stdlib
-# compiled into it stays patched (prebuilt binaries carry whatever Go they
-# were built with, which Trivy flags). golang:1.27-alpine tracks the newest
-# 1.27.x patch release.
+# Build kepubify from source so the Go stdlib and Go deps compiled into it stay
+# patched (prebuilt binaries carry whatever Go they were built with, which
+# Trivy flags).
+#  - KEPUBIFY_REF is the same upstream commit the old bundled binaries used.
+#  - golang.org/x/text and x/sync are bumped to latest (upstream pins old,
+#    vulnerable versions).
+#  - GO_MIN_VERSION is a floor: with GOTOOLCHAIN=auto, Go downloads that
+#    toolchain if the image's Go is older (the official image sets
+#    GOTOOLCHAIN=local, and a cached golang:1.27 tag can lag behind).
+#  - The output is named the way KepubifyBinaryService looks it up.
 FROM golang:1.27-alpine AS kepubify-builder
-ARG KEPUBIFY_VERSION=v4.0.4
-RUN CGO_ENABLED=0 GOBIN=/out go install -trimpath -ldflags="-s -w" \
-    github.com/pgaskin/kepubify/v4/cmd/kepubify@${KEPUBIFY_VERSION}
+ARG TARGETARCH
+ARG KEPUBIFY_REF=9546034bc023891af5ce30709de6ae2dcf264628
+ARG GO_MIN_VERSION=1.27.2
+ENV CGO_ENABLED=0 GOTOOLCHAIN=auto
+WORKDIR /build
+RUN case "${TARGETARCH}" in \
+      amd64) name=kepubify-linux-64bit ;; \
+      arm64) name=kepubify-linux-arm64 ;; \
+      arm)   name=kepubify-linux-arm ;; \
+      386)   name=kepubify-linux-32bit ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    go mod init kepubify-build && \
+    go mod edit -go=${GO_MIN_VERSION} && \
+    go get github.com/pgaskin/kepubify/v4/cmd/kepubify@${KEPUBIFY_REF} \
+           golang.org/x/text@latest golang.org/x/sync@latest && \
+    go version && \
+    mkdir -p /out && \
+    go build -trimpath -ldflags="-s -w" -o "/out/${name}" github.com/pgaskin/kepubify/v4/cmd/kepubify && \
+    go version -m "/out/${name}"
 
 FROM ${NODE_IMAGE} AS base
 RUN npm install -g pnpm@11.22.0
@@ -50,6 +73,9 @@ RUN pnpm --config.verify-deps-before-run=false --filter server run build
 
 # pnpm deploy prunes to prod deps; dist/ is gitignored so copy it in after.
 RUN pnpm --config.allow-unused-patches=true --filter server deploy --prod --legacy /deploy
+# pnpm deploy copies all of server/, including the prebuilt kepubify binaries.
+# Drop them so only the kepubify-builder output ships.
+RUN rm -rf /deploy/bin/kepubify
 RUN cp -r /app/server/dist /deploy/dist
 RUN mkdir -p /deploy/migrations && cp -r /app/server/src/db/migrations/. /deploy/migrations/
 
@@ -82,9 +108,7 @@ COPY --from=server-builder --chown=node:node /deploy ./
 COPY --from=client-builder --chown=node:node /app/client/dist ./public
 COPY --from=server-builder --chown=node:node /app/server/entrypoint.sh /app/server/file-env.sh ./
 COPY --chown=node:node LICENSE NOTICE ADDITIONAL_TERMS.md ./
-# Freshly built for this image's architecture (see kepubify-builder above).
-# Rename the target if the server expects a different filename.
-COPY --from=kepubify-builder --chown=node:node /out/kepubify ./bin/kepubify/kepubify
+COPY --from=kepubify-builder --chown=node:node /out/ ./bin/kepubify/
 COPY --chown=node:node koreader-plugin/bookorbit.koplugin/ ./koreader-plugin/bookorbit.koplugin/
 
 RUN sed -i 's/\r$//' /app/entrypoint.sh /app/file-env.sh && chmod +x /app/entrypoint.sh /app/bin/kepubify/* && mkdir -p /books /data/covers /data/book-bucket /tmp && chown -R node:node /data /tmp
