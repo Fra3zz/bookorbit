@@ -1,31 +1,27 @@
 name: Container Image
 run-name: >-
-  ${{ format('Image - {0} ({1})', github.event.workflow_run.head_commit.message, github.event.workflow_run.head_branch) }}
+  ${{ github.event_name == 'pull_request'
+      && format('Image - PR #{0}: {1}', github.event.pull_request.number, github.event.pull_request.title)
+      || format('Image - {0} ({1})', github.event.head_commit.message, github.ref_name) }}
 
 on:
-  # Runs only after CI finishes for a new commit pushed to main.
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  push:
+    branches: [main]
+  pull_request:
     branches: [main]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha }}
+  # One run per PR (newer commits cancel older ones); one run per commit on main.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 permissions:
-  actions: read
   contents: read
 
 jobs:
   # Resolve context once, then build multi-arch natively in parallel.
   prepare:
     name: Resolve Build Context
-    if: >
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -36,12 +32,15 @@ jobs:
       source_sha_short: ${{ steps.ctx.outputs.source_sha_short }}
       image_name: ${{ steps.ctx.outputs.image_name }}
       skip_build: ${{ steps.ctx.outputs.skip_build }}
+      push_image: ${{ steps.ctx.outputs.push_image }}
     steps:
       - name: Resolve build context
         id: ctx
         shell: bash
         env:
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          # For PRs, build the PR head commit; for pushes, the pushed commit.
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -52,6 +51,14 @@ jobs:
           echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
           echo "source_sha_short=${SOURCE_SHA_SHORT}" >> "$GITHUB_OUTPUT"
           echo "image_name=${IMAGE_LOWER}" >> "$GITHUB_OUTPUT"
+
+          # PRs build and scan only; images are published only from pushes to main.
+          if [[ "$EVENT_NAME" != "push" ]]; then
+            echo "push_image=false" >> "$GITHUB_OUTPUT"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "push_image=true" >> "$GITHUB_OUTPUT"
 
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -65,7 +72,7 @@ jobs:
           fi
 
   build-amd64:
-    name: Build and Push amd64
+    name: Build amd64
     needs: [prepare]
     if: needs.prepare.outputs.skip_build != 'true'
     runs-on: ubuntu-latest
@@ -78,6 +85,7 @@ jobs:
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
+      PUSH_IMAGE: ${{ needs.prepare.outputs.push_image }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -88,6 +96,7 @@ jobs:
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
 
       - name: Log in to GHCR
+        if: env.PUSH_IMAGE == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -100,7 +109,11 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          # Push by digest on main; load into the local Docker daemon for PRs.
+          outputs: >-
+            ${{ env.PUSH_IMAGE == 'true'
+                && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_NAME)
+                || format('type=docker,name={0}/{1}:pr-scan', env.REGISTRY, env.IMAGE_NAME) }}
           platforms: linux/amd64
           build-args: APP_VERSION=sha-${{ needs.prepare.outputs.source_sha_short }}
           cache-from: type=gha,scope=container-image-yml-amd64
@@ -111,7 +124,10 @@ jobs:
         env:
           TRIVY_PLATFORM: linux/amd64
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          image-ref: >-
+            ${{ env.PUSH_IMAGE == 'true'
+                && format('{0}/{1}@{2}', env.REGISTRY, env.IMAGE_NAME, steps.build.outputs.digest)
+                || format('{0}/{1}:pr-scan', env.REGISTRY, env.IMAGE_NAME) }}
           format: table
           vuln-type: os,library
           severity: CRITICAL,HIGH
@@ -119,7 +135,7 @@ jobs:
           exit-code: "1"
 
   build-arm64:
-    name: Build and Push arm64
+    name: Build arm64
     needs: [prepare]
     if: needs.prepare.outputs.skip_build != 'true'
     runs-on: ubuntu-24.04-arm
@@ -132,6 +148,7 @@ jobs:
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
+      PUSH_IMAGE: ${{ needs.prepare.outputs.push_image }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,6 +159,7 @@ jobs:
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
 
       - name: Log in to GHCR
+        if: env.PUSH_IMAGE == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -154,7 +172,11 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          # Push by digest on main; load into the local Docker daemon for PRs.
+          outputs: >-
+            ${{ env.PUSH_IMAGE == 'true'
+                && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_NAME)
+                || format('type=docker,name={0}/{1}:pr-scan', env.REGISTRY, env.IMAGE_NAME) }}
           platforms: linux/arm64
           build-args: APP_VERSION=sha-${{ needs.prepare.outputs.source_sha_short }}
           cache-from: type=gha,scope=container-image-yml-arm64
@@ -165,7 +187,10 @@ jobs:
         env:
           TRIVY_PLATFORM: linux/arm64
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          image-ref: >-
+            ${{ env.PUSH_IMAGE == 'true'
+                && format('{0}/{1}@{2}', env.REGISTRY, env.IMAGE_NAME, steps.build.outputs.digest)
+                || format('{0}/{1}:pr-scan', env.REGISTRY, env.IMAGE_NAME) }}
           format: table
           vuln-type: os,library
           severity: CRITICAL,HIGH
@@ -175,7 +200,8 @@ jobs:
   merge-manifest:
     name: Merge and Push Multi-Arch Manifest
     needs: [prepare, build-amd64, build-arm64]
-    if: needs.prepare.outputs.skip_build != 'true'
+    # Only publish tags for pushes to main, never for PRs.
+    if: needs.prepare.outputs.skip_build != 'true' && needs.prepare.outputs.push_image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

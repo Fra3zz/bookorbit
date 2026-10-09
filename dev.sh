@@ -101,6 +101,6 @@ ok "Starting dev servers..."
 echo ""
 echo "  Client  →  http://localhost:6263"
 echo "  Server  →  http://localhost:6262"
-echo ""
+echo " "
 
 pnpm dev
