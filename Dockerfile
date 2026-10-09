@@ -1,5 +1,14 @@
 ARG NODE_IMAGE=node:26.8.1-alpine3.23@sha256:871eb674ad6e692c91330a8959f1ce2f80ba3f445cdc54e306869d2ea265e42d
 
+# Build kepubify from source with a current Go toolchain so the Go stdlib
+# compiled into it stays patched (prebuilt binaries carry whatever Go they
+# were built with, which Trivy flags). golang:1.27-alpine tracks the newest
+# 1.27.x patch release.
+FROM golang:1.27-alpine AS kepubify-builder
+ARG KEPUBIFY_VERSION=v4.0.4
+RUN CGO_ENABLED=0 GOBIN=/out go install -trimpath -ldflags="-s -w" \
+    github.com/pgaskin/kepubify/v4/cmd/kepubify@${KEPUBIFY_VERSION}
+
 FROM ${NODE_IMAGE} AS base
 RUN npm install -g pnpm@11.22.0
 
@@ -73,7 +82,9 @@ COPY --from=server-builder --chown=node:node /deploy ./
 COPY --from=client-builder --chown=node:node /app/client/dist ./public
 COPY --from=server-builder --chown=node:node /app/server/entrypoint.sh /app/server/file-env.sh ./
 COPY --chown=node:node LICENSE NOTICE ADDITIONAL_TERMS.md ./
-COPY --chown=node:node server/bin/kepubify/ ./bin/kepubify/
+# Freshly built for this image's architecture (see kepubify-builder above).
+# Rename the target if the server expects a different filename.
+COPY --from=kepubify-builder --chown=node:node /out/kepubify ./bin/kepubify/kepubify
 COPY --chown=node:node koreader-plugin/bookorbit.koplugin/ ./koreader-plugin/bookorbit.koplugin/
 
 RUN sed -i 's/\r$//' /app/entrypoint.sh /app/file-env.sh && chmod +x /app/entrypoint.sh /app/bin/kepubify/* && mkdir -p /books /data/covers /data/book-bucket /tmp && chown -R node:node /data /tmp
