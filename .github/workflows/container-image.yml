@@ -7,8 +7,8 @@ run-name: >-
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  # pull_request:
+  #   branches: [main]
 
 concurrency:
   # One run per PR (newer commits cancel older ones); one run per commit on main.
