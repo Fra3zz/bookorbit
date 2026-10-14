@@ -10,6 +10,7 @@ import { createRequire } from 'module';
 import { createBookWriteFieldMask } from '../../file-write.constants';
 import { M4aAudioFormatWriter, M4bAudioFormatWriter, Mp3AudioFormatWriter } from './audio-format-writer';
 import { AudioMetadataEmbedder } from './audio-metadata-embedder';
+import { writeMp4FreeformTags } from './mp4-freeform-tags';
 
 const execFile = promisify(execFileCallback);
 const requireInstaller = createRequire(__filename);
@@ -172,6 +173,101 @@ describe('audio metadata round-trip', () => {
   it.each([
     ['m4b', M4bAudioFormatWriter],
     ['m4a', M4aAudioFormatWriter],
+  ] as const)('round-trips extended metadata for %s files with cover art', async (format, Writer) => {
+    const filePath = join(tempDir, `covered.${format}`);
+    const coverPath = join(tempDir, 'cover.jpg');
+    await generateAudioFixture(filePath, 'aac');
+    await generateCoverFixture(coverPath);
+
+    const writer = new Writer(new AudioMetadataEmbedder());
+    await writer.write(
+      filePath,
+      {
+        title: 'Covered Title',
+        subtitle: 'Covered Subtitle',
+        authors: [{ name: 'Author One', sortName: null }],
+        publisher: 'Covered Publisher',
+        publishedYear: 2026,
+        language: 'deu',
+        seriesName: 'Covered Series',
+        seriesIndex: '2',
+        audibleId: 'B0COVERED',
+        librofmId: '9781111111111',
+        coverBytes: await readFile(coverPath),
+      },
+      { dryRun: false, fieldMask: createBookWriteFieldMask() },
+    );
+
+    const tags = await probeFormatTags(filePath);
+    expect(tags).toEqual(
+      expect.objectContaining({
+        subtitle: 'Covered Subtitle',
+        publisher: 'Covered Publisher',
+        language: 'deu',
+        series: 'Covered Series',
+        'series-part': '2',
+        asin: 'B0COVERED',
+        audible_asin: 'B0COVERED',
+        librofm_isbn: '9781111111111',
+      }),
+    );
+    const coverStream = (await probeStreams(filePath)).find((stream) => stream.codec_type === 'video');
+    expect(coverStream?.disposition?.attached_pic).toBe(1);
+
+    vi.resetModules();
+    const { extractAudioMetadata } = await import('../../../metadata/extractors/audio.extractor');
+    const extracted = await extractAudioMetadata(filePath);
+    expect(extracted).toEqual(
+      expect.objectContaining({
+        title: 'Covered Title',
+        subtitle: 'Covered Subtitle',
+        publisher: 'Covered Publisher',
+        language: 'deu',
+        seriesName: 'Covered Series',
+        seriesIndex: '2',
+        audibleId: 'B0COVERED',
+        librofmId: '9781111111111',
+      }),
+    );
+    expect(extracted.coverBytes?.length).toBeGreaterThan(0);
+  });
+
+  it('keeps tags it does not manage and replaces stale ones when rewriting a tagged m4b', async () => {
+    const filePath = join(tempDir, 'audible.m4b');
+    const coverPath = join(tempDir, 'cover.jpg');
+    await generateAudioFixture(filePath, 'aac');
+    await generateCoverFixture(coverPath);
+    const writer = new M4bAudioFormatWriter(new AudioMetadataEmbedder());
+    await writer.write(
+      filePath,
+      { title: 'Old Title', coverBytes: await readFile(coverPath) },
+      { dryRun: false, fieldMask: createBookWriteFieldMask() },
+    );
+    await writeMp4FreeformTags(filePath, [
+      { name: 'AUDIBLE_ACR', value: 'CR!ABC' },
+      { name: 'SUBTITLE', value: 'Old Subtitle' },
+      { name: 'PART', value: '9' },
+    ]);
+
+    await writer.write(
+      filePath,
+      { title: 'New Title', subtitle: 'New Subtitle', seriesIndex: '3' },
+      { dryRun: false, fieldMask: new Set(['title', 'subtitle', 'seriesIndex']) },
+    );
+
+    const tags = await probeFormatTags(filePath);
+    expect(tags).toEqual(expect.objectContaining({ title: 'New Title', subtitle: 'New Subtitle', 'series-part': '3', audible_acr: 'CR!ABC' }));
+    expect(tags.part).toBeUndefined();
+    expect((await probeStreams(filePath)).find((stream) => stream.codec_type === 'video')?.disposition?.attached_pic).toBe(1);
+
+    vi.resetModules();
+    const { extractAudioMetadata } = await import('../../../metadata/extractors/audio.extractor');
+    expect(await extractAudioMetadata(filePath)).toEqual(expect.objectContaining({ title: 'New Title', subtitle: 'New Subtitle', seriesIndex: '3' }));
+  });
+
+  it.each([
+    ['m4b', M4bAudioFormatWriter],
+    ['m4a', M4aAudioFormatWriter],
   ] as const)('round-trips series metadata while replacing and preserving cover art for %s files', async (format, Writer) => {
     const filePath = join(tempDir, `fixture.${format}`);
     const coverPath = join(tempDir, 'cover.jpg');
@@ -248,7 +344,111 @@ describe('audio metadata round-trip', () => {
     expect(await extractArt(filePath)).toEqual(artBefore);
   });
 
-  async function generateChapteredAudioFixture(filePath: string, coverPath: string): Promise<void> {
+  // Audiobookshelf's merge stream-copies MP3 tracks into an MP4, leaving MP3 audio the ipod muxer rejects.
+  describe.each([
+    ['m4b', M4bAudioFormatWriter],
+    ['m4a', M4aAudioFormatWriter],
+  ] as const)('a %s whose audio is MP3', (format, Writer) => {
+    it('takes new tags and a replacement cover, keeping the MP3 audio and the chapters', async () => {
+      const filePath = join(tempDir, `merged.${format}`);
+      const coverPath = join(tempDir, 'cover.jpg');
+      await generateCoverFixture(coverPath);
+      await generateChapteredAudioFixture(filePath, coverPath, 'libmp3lame');
+
+      const writer = new Writer(new AudioMetadataEmbedder());
+      await expect(
+        writer.write(
+          filePath,
+          {
+            title: 'Merged Title',
+            subtitle: 'Merged Subtitle',
+            seriesName: 'Merged Series',
+            seriesIndex: '3',
+            coverBytes: await readFile(coverPath),
+          },
+          { dryRun: false, fieldMask: createBookWriteFieldMask() },
+        ),
+      ).resolves.toEqual(expect.objectContaining({ status: 'success' }));
+
+      const streams = await probeStreams(filePath);
+      expect(streams.find((stream) => stream.codec_type === 'audio')?.codec_name).toBe('mp3');
+      expect(streams.find((stream) => stream.codec_type === 'video')?.disposition?.attached_pic).toBe(1);
+      expect(await probeChapterTitles(filePath)).toEqual(['One', 'Two']);
+
+      vi.resetModules();
+      const { extractAudioMetadata } = await import('../../../metadata/extractors/audio.extractor');
+      const extracted = await extractAudioMetadata(filePath);
+      expect(extracted).toEqual(
+        expect.objectContaining({ title: 'Merged Title', subtitle: 'Merged Subtitle', seriesName: 'Merged Series', seriesIndex: '3' }),
+      );
+      expect(extracted.coverBytes?.length).toBeGreaterThan(0);
+    });
+
+    it('takes new tags without a cover, keeping its chapters and existing art', async () => {
+      const filePath = join(tempDir, `merged.${format}`);
+      const coverPath = join(tempDir, 'cover.jpg');
+      await generateCoverFixture(coverPath);
+      await generateChapteredAudioFixture(filePath, coverPath, 'libmp3lame');
+      const artBefore = await extractArt(filePath);
+
+      const writer = new Writer(new AudioMetadataEmbedder());
+      await expect(
+        writer.write(
+          filePath,
+          { title: 'Tag Only', subtitle: 'Tag Only Subtitle', coverBytes: null },
+          { dryRun: false, fieldMask: createBookWriteFieldMask() },
+        ),
+      ).resolves.toEqual(expect.objectContaining({ status: 'success' }));
+
+      expect(await probeChapterTitles(filePath)).toEqual(['One', 'Two']);
+      expect(await extractArt(filePath)).toEqual(artBefore);
+      expect(await probeFormatTags(filePath)).toEqual(expect.objectContaining({ title: 'Tag Only', subtitle: 'Tag Only Subtitle' }));
+    });
+
+    it('takes new tags when it carries no art at all', async () => {
+      const filePath = join(tempDir, `bare.${format}`);
+      await execFile(ffmpegPath, [
+        '-v',
+        'error',
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=1000:duration=0.2',
+        '-c:a',
+        'libmp3lame',
+        '-f',
+        'mp4',
+        filePath,
+      ]);
+
+      const writer = new Writer(new AudioMetadataEmbedder());
+      await expect(
+        writer.write(filePath, { title: 'Bare Title', subtitle: 'Bare Subtitle' }, { dryRun: false, fieldMask: createBookWriteFieldMask() }),
+      ).resolves.toEqual(expect.objectContaining({ status: 'success' }));
+
+      expect(await probeFormatTags(filePath)).toEqual(expect.objectContaining({ title: 'Bare Title', subtitle: 'Bare Subtitle' }));
+      expect((await probeStreams(filePath)).find((stream) => stream.codec_type === 'audio')?.codec_name).toBe('mp3');
+    });
+  });
+
+  it('keeps the iTunes file type when rewriting an AAC m4b', async () => {
+    const filePath = join(tempDir, 'itunes.m4b');
+    const coverPath = join(tempDir, 'cover.jpg');
+    await generateCoverFixture(coverPath);
+    await generateChapteredAudioFixture(filePath, coverPath, 'aac');
+
+    const writer = new M4bAudioFormatWriter(new AudioMetadataEmbedder());
+    await writer.write(
+      filePath,
+      { title: 'Branded', coverBytes: await readFile(coverPath) },
+      { dryRun: false, fieldMask: createBookWriteFieldMask() },
+    );
+
+    expect((await probeFormatTags(filePath)).major_brand?.trim()).toBe('M4A');
+  });
+
+  async function generateChapteredAudioFixture(filePath: string, coverPath: string, audioCodec = 'aac'): Promise<void> {
     const chaptersPath = join(tempDir, 'chapters.txt');
     await writeFile(
       chaptersPath,
@@ -275,7 +475,7 @@ describe('audio metadata round-trip', () => {
       '-map_chapters',
       '2',
       '-c:a',
-      'aac',
+      audioCodec,
       '-b:a',
       '64k',
       '-c:v',

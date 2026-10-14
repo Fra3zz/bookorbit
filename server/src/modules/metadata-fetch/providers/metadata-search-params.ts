@@ -29,6 +29,8 @@ export interface MetadataSearchParams {
   // Hint for providers to cap deep candidate exploration in non-interactive flows
   // (e.g. auto-fill/background refresh where there is no manual candidate picking).
   maxCandidatesPerProvider?: number;
+  // Automatic pipelines must not select a ComicVine run from equally plausible volume matches.
+  requireUnambiguousMatch?: boolean;
   // Interactive result lists can afford bounded cover checks. Bulk metadata pipelines must not
   // multiply one provider lookup into many thumbnail requests.
   validateCoverPlaceholders?: boolean;

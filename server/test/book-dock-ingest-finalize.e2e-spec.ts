@@ -1,3 +1,10 @@
+// The audio extractor reads FFPROBE_PATH as it loads, so this has to run ahead of every import below.
+vi.hoisted(() => {
+  const requireFromHere = process.getBuiltinModule('node:module').createRequire(__filename);
+  process.env.FFPROBE_PATH ??= (requireFromHere('@ffprobe-installer/ffprobe') as { path: string }).path;
+});
+
+import { randomUUID } from 'crypto';
 import { mkdir, readFile, realpath, utimes, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { afterEach } from 'vitest';
@@ -5,10 +12,13 @@ import { afterEach } from 'vitest';
 import { eq, inArray } from 'drizzle-orm';
 import {
   Permission,
+  type AudiobookManifest,
+  type AudiobookPlaybackState,
   type BookDockDiscardDuplicatesResult,
   type BookDockFile,
   type BookDockFinalizePreviewResult,
   type BookDockFinalizeResult,
+  type DashboardScrollerResponse,
 } from '@bookorbit/types';
 
 import * as schema from '../src/db/schema';
@@ -16,7 +26,7 @@ import { parseFb2File } from '../src/modules/metadata/lib/fb2-parser';
 import { ScannerService } from '../src/modules/scanner/scanner.service';
 import { waitForCondition } from './e2e/app-harness';
 import { buildFb2Fixture } from './e2e/book-dock/book-dock-fixture-builder';
-import { createPdfFixture } from './e2e/metadata-write/metadata-write-fixture-builder';
+import { createM4bFixture, createPdfFixture } from './e2e/metadata-write/metadata-write-fixture-builder';
 import {
   authHeader,
   closeBookDockE2EContext,
@@ -525,6 +535,125 @@ describe('Book Dock ingest + finalize (e2e)', () => {
       expect(await finalizeInto(destination, 'two-media-default.m4b')).toBe(bookId);
 
       expect(await primaryFormatOf(bookId)).toEqual({ formats: ['epub', 'm4b'], primary: 'epub' });
+    });
+  });
+
+  /**
+   * Issue 1757: finalize filed audiobooks with no per-file duration, and the player derives progress
+   * only from those, so listening stayed at 0% and the book never reached Continue Listening until
+   * the library was next scanned. These libraries are not watched, so nothing else measures them.
+   */
+  describe('listening to a filed audiobook', () => {
+    const AUDIO_SECONDS = 4;
+    const metadata = { title: 'Listening Title', authors: ['Listening Author'] };
+
+    async function finalizeRow(row: { id: number }): Promise<number> {
+      const response = await context.app.inject({
+        method: 'POST',
+        url: '/api/v1/book-dock/finalize',
+        headers: authHeader(context.adminToken),
+        payload: { fileIds: [row.id] },
+      });
+      expect(response.statusCode).toBe(201);
+      const result = (response.json() as BookDockFinalizeResult).results[0];
+      expect(result).toMatchObject({ success: true, bookId: expect.any(Number) });
+      return result!.bookId!;
+    }
+
+    async function dockAudiobook(destination: Awaited<ReturnType<typeof createLibraryWithFolder>>, fileName: string, selected = {}) {
+      const fixture = await createM4bFixture(context.fixture.booksPath, `audio-fixtures/${randomUUID()}.m4b`, {
+        title: metadata.title,
+        durationSeconds: AUDIO_SECONDS,
+      });
+      return createBookDockRow(context, {
+        fileName,
+        content: await readFile(fixture),
+        selectedMetadata: { ...metadata, ...selected },
+        targetLibraryId: destination.libraryId,
+        targetFolderId: destination.libraryFolderId,
+      });
+    }
+
+    async function audioDurations(bookId: number) {
+      const files = await context.db
+        .select({ format: schema.bookFiles.format, durationSeconds: schema.bookFiles.durationSeconds })
+        .from(schema.bookFiles)
+        .where(eq(schema.bookFiles.bookId, bookId));
+      const [meta] = await context.db
+        .select({ durationSeconds: schema.bookMetadata.durationSeconds })
+        .from(schema.bookMetadata)
+        .where(eq(schema.bookMetadata.bookId, bookId))
+        .limit(1);
+      return { files: files.filter((file) => file.format === 'm4b').map((file) => file.durationSeconds), book: meta?.durationSeconds ?? null };
+    }
+
+    /** What the web player and the iOS app do: read the manifest, then save a position halfway in. */
+    async function listenHalfway(bookId: number): Promise<AudiobookPlaybackState> {
+      const manifestResponse = await context.app.inject({
+        method: 'GET',
+        url: `/api/v1/audiobooks/${bookId}/manifest`,
+        headers: authHeader(context.adminToken),
+      });
+      expect(manifestResponse.statusCode).toBe(200);
+      const manifest = manifestResponse.json() as AudiobookManifest;
+      expect(manifest.assets).toHaveLength(1);
+      expect(manifest.assets[0]!.durationMs).toBe(AUDIO_SECONDS * 1000);
+      expect(manifest.totalDurationMs).toBe(AUDIO_SECONDS * 1000);
+
+      const saveResponse = await context.app.inject({
+        method: 'PUT',
+        url: `/api/v1/audiobooks/${bookId}/playback-state`,
+        headers: authHeader(context.adminToken),
+        payload: {
+          assetId: manifest.assets[0]!.assetId,
+          positionMs: (AUDIO_SECONDS * 1000) / 2,
+          capturedAt: new Date().toISOString(),
+          operationId: randomUUID(),
+          baseRevision: 0,
+          manifestRevision: manifest.revision,
+        },
+      });
+      expect(saveResponse.statusCode).toBe(200);
+      return saveResponse.json() as AudiobookPlaybackState;
+    }
+
+    async function continueListeningIds(): Promise<number[]> {
+      const response = await context.app.inject({
+        method: 'GET',
+        url: '/api/v1/dashboard/scrollers/continue-listening?limit=50',
+        headers: authHeader(context.adminToken),
+      });
+      expect(response.statusCode).toBe(200);
+      return (response.json() as DashboardScrollerResponse).books.map((book) => book.id);
+    }
+
+    it('measures a new audiobook, so listening moves its progress and puts it on Continue Listening', async () => {
+      const destination = await createLibraryWithFolder(context, { allowedFormats: ['m4b'] });
+      // A runtime from a metadata provider: the file's own length replaces it, as a scan would.
+      const row = await dockAudiobook(destination, 'listening-new.m4b', { durationSeconds: 3600 });
+
+      const bookId = await finalizeRow(row);
+
+      expect(await audioDurations(bookId)).toEqual({ files: [AUDIO_SECONDS], book: AUDIO_SECONDS });
+      expect(await listenHalfway(bookId)).toMatchObject({ percentage: 50, completed: false });
+      expect(await continueListeningIds()).toContain(bookId);
+    });
+
+    it('measures an audiobook that joins an ebook already on the shelf', async () => {
+      const destination = await createLibraryWithFolder(context, { allowedFormats: ['epub', 'm4b'] });
+      const ebook = await createBookDockRow(context, {
+        fileName: 'listening-joined.epub',
+        selectedMetadata: metadata,
+        targetLibraryId: destination.libraryId,
+        targetFolderId: destination.libraryFolderId,
+      });
+      const bookId = await finalizeRow(ebook);
+
+      expect(await finalizeRow(await dockAudiobook(destination, 'listening-joined.m4b'))).toBe(bookId);
+
+      expect(await audioDurations(bookId)).toEqual({ files: [AUDIO_SECONDS], book: AUDIO_SECONDS });
+      expect(await listenHalfway(bookId)).toMatchObject({ percentage: 50, completed: false });
+      expect(await continueListeningIds()).toContain(bookId);
     });
   });
 

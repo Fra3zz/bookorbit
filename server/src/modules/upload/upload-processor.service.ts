@@ -1,3 +1,4 @@
+import { realignAudioTrackOrder } from '../../db/audio-track-order';
 import { deleteBookFilesWithHashInvalidation, deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
 import { Inject, Injectable, InternalServerErrorException, Logger, Optional } from '@nestjs/common';
 import { stat } from 'fs/promises';
@@ -148,6 +149,9 @@ export class UploadProcessorService {
       if (upserted.joinedBook && (fileOptions.role ?? 'content') === 'content') {
         await this.reselectPrimaryFile(tx, upserted.joinedBook);
       }
+      if (upserted.joinedBook && isAudioFormat(format)) {
+        await realignAudioTrackOrder(tx, upserted.bookId);
+      }
       if (uploadSessionId) {
         await tx.update(uploadSessions).set({ resultBookId: upserted.bookId, updatedAt: new Date() }).where(eq(uploadSessions.id, uploadSessionId));
       }
@@ -177,10 +181,12 @@ export class UploadProcessorService {
       const createdBookIds: number[] = [];
       const attachedFileIds: number[] = [];
       const joinedBooks = new Map<number, JoinedBook>();
+      const audioBookIds = new Set<number>();
 
       for (const [index, file] of files.entries()) {
         const result = await this.upsertBookFile(tx, libraryId, libraryFolderId, file, measured[index]!);
         if (!bookIds.includes(result.bookId)) bookIds.push(result.bookId);
+        if (isAudioFormat(file.format)) audioBookIds.add(result.bookId);
         if (result.createdBook) createdBookIds.push(result.bookId);
         // A row on a book this unit created goes away with the book, so only rows attached to a
         // book that was already there need remembering - and only the ones actually inserted,
@@ -193,6 +199,9 @@ export class UploadProcessorService {
           joinedBooks.set(joined.id, joined);
         }
       }
+
+      // The unit numbered its files from zero, which collides with the numbers already on a book it joined.
+      for (const bookId of audioBookIds) await realignAudioTrackOrder(tx, bookId);
 
       const replacedPrimaries: ReplacedPrimary[] = [];
       for (const joined of joinedBooks.values()) {

@@ -1,10 +1,14 @@
+import { basename } from 'node:path';
+
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { EmailTemplateRepository } from './email-template.repository';
+import { EmailPreferencesRepository } from './email-preferences.repository';
 import { EmailTemplateContextService } from './email-template-context.service';
 import { renderTemplate } from './email-template-renderer';
 import { EmailBookAccessService } from './email-book-access.service';
+import { EmailFileSelector } from './email-file-selector';
 import { CreateEmailTemplateDto } from './dto/create-email-template.dto';
 import { UpdateEmailTemplateDto } from './dto/update-email-template.dto';
 import type { EmailTemplate } from '../../db/schema';
@@ -16,6 +20,8 @@ export class EmailTemplateService {
     private readonly repo: EmailTemplateRepository,
     private readonly contextService: EmailTemplateContextService,
     private readonly bookAccessService: EmailBookAccessService,
+    private readonly preferences: EmailPreferencesRepository,
+    private readonly fileSelector: EmailFileSelector,
   ) {}
 
   async findAll(user: RequestUser) {
@@ -79,20 +85,30 @@ export class EmailTemplateService {
     if (template.userId !== user.id && !template.isSystem) {
       throw new ForbiddenException('Cannot set this template as default');
     }
-    if (!template.isSystem) {
-      const updated = (await this.repo.setDefault(id, user.id)).find((row) => row.id === id);
-      if (!updated) throw new NotFoundException('Template not found');
-      return updated;
-    }
-    await this.repo.clearDefault(user.id);
-    return template;
+    await this.preferences.setDefaults(user.id, { defaultTemplateId: id });
+    if (template.isSystem) return template;
+    const [updated] = await this.repo.findById(id);
+    if (!updated) throw new NotFoundException('Template not found');
+    return updated;
   }
 
   async preview(id: number, bookId: number, fileId: number | null, user: RequestUser) {
     const template = await this.getAccessible(id, user);
+    // This route predates the attachment, so its response keeps exactly the shape released clients read.
+    const { subject, bodyText } = await this.previewText(template.subject, template.bodyText, bookId, user, fileId);
+    return { subject, bodyText };
+  }
+
+  /**
+   * The text as a send of this book would read, and the file it would attach, named as the email names
+   * it. Without a file, {{format}} and {{fileSize}} describe the edition a send would pick by default.
+   */
+  async previewText(subject: string, bodyText: string, bookId: number, user: RequestUser, fileId: number | null = null) {
     await this.bookAccessService.assertUserCanAccessBook(bookId, user);
-    const context = await this.contextService.buildForBook(bookId, fileId, user.name);
-    return renderTemplate(template.subject, template.bodyText, context);
+    const file = await this.fileSelector.select(bookId, fileId, null).catch(() => null);
+    const context = await this.contextService.buildForBook(bookId, file?.id ?? null, user.name);
+    const attachment = file ? { fileName: basename(file.absolutePath), format: file.format, sizeBytes: file.sizeBytes } : null;
+    return { ...renderTemplate(subject, bodyText, context), attachment };
   }
 
   async resolveTemplate(templateId: number | null | undefined, user: RequestUser): Promise<EmailTemplate> {

@@ -58,6 +58,7 @@ import { DownloadClientRegistry } from '../download-clients/download-client-regi
 import { ADD_PATH_MAPPING_HINT } from '../download-clients/path-mapping.service';
 import {
   IndexerSearchException,
+  IndexerRetryExhaustedException,
   type IndexerAdapter,
   type ReleaseCandidate,
   type ReleaseFile,
@@ -345,7 +346,9 @@ export class RequestFulfillmentService {
     try {
       return await run();
     } catch (error) {
-      if (!automated || !isTransientGrabFailure(error)) throw error;
+      if (!automated || !isTransientGrabFailure(error) || (error instanceof HttpException && error.cause instanceof IndexerRetryExhaustedException)) {
+        throw error;
+      }
 
       const code = grabFailureCode(error) ?? (phase === 'client' ? 'GRAB_CLIENT_UNAVAILABLE' : 'GRAB_SOURCE_UNAVAILABLE');
       this.logger.warn(
@@ -857,7 +860,10 @@ async function resolveReleaseFile(adapter: IndexerAdapter, release: ReleaseCandi
  */
 function indexerRefusal(error: IndexerSearchException, release: ReleaseCandidate): HttpException {
   if (RETRYABLE_INDEXER_FAILURES.includes(error.failure)) {
-    return grabUnavailable('GRAB_SOURCE_UNAVAILABLE', error.message);
+    return new ServiceUnavailableException(
+      { message: error.message, errorCode: 'GRAB_SOURCE_UNAVAILABLE' satisfies GrabFailureCode, statusCode: HttpStatus.SERVICE_UNAVAILABLE },
+      { cause: error },
+    );
   }
   return grabError(release.vipOnly === true ? 'GRAB_VIP_REQUIRED' : 'GRAB_SOURCE_REFUSED', error.message);
 }

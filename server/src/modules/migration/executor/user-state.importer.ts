@@ -27,6 +27,7 @@ import {
   type ProgressMediaKind,
   type TargetBookFile,
   toDate,
+  toReadingDates,
   truncateNullableText,
   truncateText,
   uniqueNumbers,
@@ -200,8 +201,7 @@ export class UserStateImporter {
         bookId: targetBookId,
         status: normalizeReadStatus(row.status, row.percentage),
         source: 'manual',
-        startedAt: toDate(row.startedAt),
-        finishedAt: toDate(row.finishedAt),
+        ...toReadingDates(row.startedAt, row.finishedAt),
         sourceUpdatedAt: toDate(row.updatedAt),
       });
       counters.imported += 1;

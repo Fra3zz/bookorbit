@@ -1082,3 +1082,106 @@ describe('UserStateImporter cache invalidation', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 });
+
+describe('UserStateImporter reading dates', () => {
+  type WrittenStatus = { userId: number; bookId: number; status: string; startedAt: Date | null; finishedAt: Date | null };
+
+  async function importStatuses(rows: Array<Record<string, unknown>>) {
+    const { importer, repo, importRepo } = makeImporter();
+    const bookMap = new Map(rows.map((row, index) => [row.sourceBookId as string, 100 + index]));
+    await (importer as any).importUserBookStatuses(
+      40,
+      { execution: { sourceData: { userBookStatuses: rows } } },
+      new Map([['abs-user', 7]]),
+      bookMap,
+      async () => {},
+    );
+    expect(importRepo.batchMergeUserBookStatuses).toHaveBeenCalledTimes(1);
+    const written = importRepo.batchMergeUserBookStatuses.mock.calls[0][0] as WrittenStatus[];
+    return { repo, written, bookMap };
+  }
+
+  it('imports every status when one book was finished before Audiobookshelf says it was started', async () => {
+    // The shape of issue 1678: a finish date sent by a client lands before the progress row's
+    // creation time, which Audiobookshelf reports as the start. One such row used to fail the
+    // whole batch, so none of the reader's statuses arrived.
+    const { repo, written, bookMap } = await importStatuses([
+      {
+        sourceUserId: 'abs-user',
+        sourceBookId: 'backfilled',
+        status: 'read',
+        percentage: 100,
+        startedAt: '2026-10-12T05:23:33.044Z',
+        finishedAt: '2025-09-07T05:23:32.000Z',
+        updatedAt: '2026-10-12T05:23:33.044Z',
+      },
+      {
+        sourceUserId: 'abs-user',
+        sourceBookId: 'marked-finished',
+        status: 'read',
+        percentage: 100,
+        startedAt: '2026-10-12T05:20:33.137Z',
+        finishedAt: '2026-10-12T05:20:33.137Z',
+        updatedAt: '2026-10-12T05:20:33.138Z',
+      },
+      {
+        sourceUserId: 'abs-user',
+        sourceBookId: 'listening',
+        status: 'reading',
+        percentage: 33.3,
+        startedAt: '2026-10-12T05:20:33.172Z',
+        finishedAt: null,
+        updatedAt: '2026-10-12T05:20:33.172Z',
+      },
+    ]);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        bookId: bookMap.get('backfilled'),
+        status: 'read',
+        startedAt: null,
+        finishedAt: new Date('2025-09-07T05:23:32.000Z'),
+      }),
+      expect.objectContaining({
+        bookId: bookMap.get('marked-finished'),
+        status: 'read',
+        startedAt: new Date('2026-10-12T05:20:33.137Z'),
+        finishedAt: new Date('2026-10-12T05:20:33.137Z'),
+      }),
+      expect.objectContaining({
+        bookId: bookMap.get('listening'),
+        status: 'reading',
+        startedAt: new Date('2026-10-12T05:20:33.172Z'),
+        finishedAt: null,
+      }),
+    ]);
+    expect(repo.setRunMetric).toHaveBeenCalledWith(40, 'user_state', 'user_book_status', expect.objectContaining({ processed: 3, imported: 3 }));
+  });
+
+  it('never writes a row the finished-after-started check would reject, and never loses a finish date', async () => {
+    const candidates = [null, '2024-05-01T00:00:00.000Z', '2024-05-01T00:00:00.001Z', '2025-06-01T12:00:00+02:00', 'not-a-date'];
+    const rows = candidates.flatMap((startedAt, startIndex) =>
+      candidates.map((finishedAt, finishIndex) => ({
+        sourceUserId: 'abs-user',
+        sourceBookId: `book-${startIndex}-${finishIndex}`,
+        status: 'read',
+        percentage: 100,
+        startedAt,
+        finishedAt,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })),
+    );
+
+    const { written } = await importStatuses(rows);
+
+    expect(written).toHaveLength(rows.length);
+    for (const [index, row] of rows.entries()) {
+      const out = written[index];
+      const finish = row.finishedAt ? new Date(row.finishedAt) : null;
+      const expectedFinish = finish && Number.isFinite(finish.getTime()) ? finish : null;
+      // Mirrors user_book_status_finished_after_started_chk.
+      if (out.startedAt && out.finishedAt) expect(out.finishedAt.getTime()).toBeGreaterThanOrEqual(out.startedAt.getTime());
+      expect(out.finishedAt).toEqual(expectedFinish);
+    }
+  });
+});

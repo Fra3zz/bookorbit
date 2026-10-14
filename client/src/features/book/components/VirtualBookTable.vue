@@ -756,7 +756,7 @@ defineExpose({
         <tbody v-if="!initialized && loading" role="rowgroup">
           <tr v-for="i in SKELETON_ROW_COUNT" :key="`skeleton-${i}`" role="row" class="border-b border-border/50">
             <td v-if="selectionMode" role="gridcell" class="px-2 align-middle" :class="rowPaddingClass" :style="{ width: '36px', minWidth: '36px' }">
-              <div class="mx-auto h-4 w-4 rounded bg-muted animate-pulse" />
+              <div class="mx-auto h-4 w-4 rounded-xs bg-muted animate-pulse" />
             </td>
             <td
               v-for="col in displayColumns"
@@ -771,8 +771,8 @@ defineExpose({
                 <div v-for="s in 5" :key="s" class="h-3 w-3 rounded-full bg-muted animate-pulse" />
               </div>
               <div v-else-if="col.cellType === 'progress'" class="h-1.5 w-full rounded-full bg-muted animate-pulse" />
-              <div v-else-if="col.cellType === 'actions'" class="h-5 w-5 rounded bg-muted animate-pulse" />
-              <div v-else class="h-4 rounded bg-muted animate-pulse" :style="{ width: `${40 + ((i * 17 + col.defaultWidth) % 60)}%` }" />
+              <div v-else-if="col.cellType === 'actions'" class="h-5 w-5 rounded-xs bg-muted animate-pulse" />
+              <div v-else class="h-4 rounded-xs bg-muted animate-pulse" :style="{ width: `${40 + ((i * 17 + col.defaultWidth) % 60)}%` }" />
             </td>
           </tr>
         </tbody>
@@ -793,7 +793,7 @@ defineExpose({
                 :class="rowPaddingClass"
                 :style="{ width: `${col.defaultWidth}px`, minWidth: `${col.minWidth}px` }"
               >
-                <div class="h-3.5 max-w-32 animate-pulse rounded bg-foreground/5" data-testid="book-row-skeleton" />
+                <div class="h-3.5 max-w-32 animate-pulse rounded-xs bg-foreground/5" data-testid="book-row-skeleton" />
               </td>
             </tr>
             <tr
@@ -878,7 +878,12 @@ defineExpose({
                 @click="focusTableCell(vItem.index, colIdx, $event, rowBook(vItem.index).id, col.id)"
               >
                 <template v-if="rowBook(vItem.index).collapsedSeries">
-                  <BookTableCollapsedSeriesCell :book="rowBook(vItem.index)" :col-id="col.id" @open-series="handleOpenSeries(rowBook(vItem.index))" />
+                  <BookTableCollapsedSeriesCell
+                    :book="rowBook(vItem.index)"
+                    :col-id="col.id"
+                    :link-fn="getChipsLinkFn(col.id)"
+                    @open-series="handleOpenSeries(rowBook(vItem.index))"
+                  />
                 </template>
                 <template v-else>
                   <BookTableCellDispatcher
@@ -1002,7 +1007,7 @@ defineExpose({
       </div>
       <div class="flex items-center gap-3">
         <button
-          class="inline-flex h-5 w-5 items-center justify-center rounded border border-border/70 bg-background text-[11px] font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          class="inline-flex h-5 w-5 items-center justify-center rounded-xs border border-border/70 bg-background text-[11px] font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           :title="t('book.tableView.keyboardShortcutsTitle')"
           :aria-label="t('book.tableView.showKeyboardShortcuts')"
           @click="shortcutOverlayOpen = true"

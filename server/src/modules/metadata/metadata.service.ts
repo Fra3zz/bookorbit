@@ -1,10 +1,11 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import sharp from 'sharp';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
+import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { isKnownPlaceholderCover } from '../../common/utils/placeholder-cover.utils';
 import {
@@ -55,6 +56,7 @@ const MAX_PUBLISHED_YEAR = 2200;
 const MAX_COVER_DOWNLOADS = 3;
 const MAX_COVER_DOWNLOAD_BYTES = 20 * 1024 * 1024;
 const COVER_DOWNLOAD_TIMEOUT_MS = 15_000;
+const AUDIO_DURATION_PROBE_CONCURRENCY = 4;
 
 /** A fetched cover and how the provider's stated shape fits the slot it is meant for. */
 export type CoverDownloadChoice = { url: string; fit?: 'match' | 'unknown' | 'mismatch' };
@@ -295,6 +297,11 @@ export class MetadataService {
     return coverShapeFromSize(width, height) === (medium === 'audio' ? 'square' : 'portrait') ? 'fits' : 'wrong_shape';
   }
 
+  /** Whether a book's cover slot for this medium holds nothing, active or dormant. */
+  async coverSlotIsEmpty(bookId: number, medium: CoverMedium): Promise<boolean> {
+    return this.coverStore.slotIsEmpty(bookId, medium);
+  }
+
   async saveExtractedCoverBytes(bookId: number, bytes: Buffer, medium?: CoverMedium): Promise<void> {
     const target = medium ?? (await this.coverStore.chooseWriteMedium(bookId, bytes));
     if (await this.persistCover(bookId, target, bytes, true, 'dock')) await this.scoreService.calculateAndSave(bookId);
@@ -436,13 +443,44 @@ export class MetadataService {
     return chaptersReachLastFile(stored, orderedDurationsMs);
   }
 
-  async extractAudioFileDuration(bookId: number, absolutePath: string): Promise<void> {
+  async extractAudioFileDuration(bookId: number, absolutePath: string): Promise<number | null> {
     const durationSeconds = await parseAudioDuration(absolutePath);
-    if (durationSeconds === null) return;
+    if (durationSeconds === null) return null;
     await this.db
       .update(schema.bookFiles)
       .set({ durationSeconds })
       .where(and(eq(schema.bookFiles.bookId, bookId), eq(schema.bookFiles.absolutePath, absolutePath)));
+    return durationSeconds;
+  }
+
+  /**
+   * Measures the audio files of a book that have no duration yet, then re-totals the book. The
+   * audiobook player derives progress only once every file has a duration, so a book left with a
+   * gap stays at 0%. A file that cannot be measured leaves the total alone: summing only the rest
+   * would shrink it.
+   */
+  async measureMissingAudioDurations(bookId: number): Promise<{ measured: number; failed: number }> {
+    const files = await this.db
+      .select({ absolutePath: schema.bookFiles.absolutePath })
+      .from(schema.bookFiles)
+      .where(
+        and(
+          eq(schema.bookFiles.bookId, bookId),
+          eq(schema.bookFiles.role, 'content'),
+          inArray(schema.bookFiles.format, [...METADATA_AUDIO_FORMATS]),
+          or(isNull(schema.bookFiles.durationSeconds), lte(schema.bookFiles.durationSeconds, 0)),
+        ),
+      );
+    if (files.length === 0) return { measured: 0, failed: 0 };
+
+    const outcomes = await mapWithConcurrency(files, AUDIO_DURATION_PROBE_CONCURRENCY, async (file) => {
+      const durationSeconds = await this.extractAudioFileDuration(bookId, file.absolutePath);
+      return durationSeconds !== null && durationSeconds > 0;
+    });
+    const measured = outcomes.filter(Boolean).length;
+    const failed = files.length - measured;
+    if (failed === 0) await this.aggregateAudioDuration(bookId);
+    return { measured, failed };
   }
 
   async aggregateAudioDuration(bookId: number): Promise<void> {

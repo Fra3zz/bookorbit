@@ -1841,10 +1841,13 @@ describe('FileRenameService', () => {
       if (path.toString() === '/library/Frank Herbert/cover.jpg') return Promise.resolve(undefined);
       return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
     });
+    const warn = vi.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
 
     const result = await service.performRename(5, 12);
     expect(result.status).toBe('skipped');
     expect(result.reason).toBe('target path already exists on disk');
+    // The book's own file is free; the log must name the companion that collided.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('newPath="/library/Frank Herbert/cover.jpg"'));
   });
 
   describe('cancelPendingRename', () => {

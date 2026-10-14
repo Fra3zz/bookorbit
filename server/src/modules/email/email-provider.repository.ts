@@ -36,24 +36,6 @@ export class EmailProviderRepository {
       .returning();
   }
 
-  clearDefault(userId: number) {
-    return this.db
-      .update(emailProviders)
-      .set({ isDefault: false })
-      .where(and(eq(emailProviders.userId, userId), eq(emailProviders.isDefault, true)));
-  }
-
-  setDefault(id: number, userId: number) {
-    return this.db
-      .update(emailProviders)
-      .set({
-        isDefault: sql`case when ${emailProviders.id} = ${id} then true else false end`,
-        updatedAt: sql`now()`,
-      })
-      .where(eq(emailProviders.userId, userId))
-      .returning();
-  }
-
   setSharedByOwner(id: number, userId: number, isShared: boolean) {
     return this.db
       .update(emailProviders)
@@ -66,6 +48,15 @@ export class EmailProviderRepository {
     return this.db
       .delete(emailProviders)
       .where(and(eq(emailProviders.id, id), eq(emailProviders.userId, userId)))
+      .returning();
+  }
+
+  /** Kept on the row so the settings page can say whether a server works without testing it again. */
+  recordTestResult(id: number, ok: boolean, error: string | null) {
+    return this.db
+      .update(emailProviders)
+      .set({ lastTestedAt: sql`now()`, lastTestOk: ok, lastTestError: error })
+      .where(eq(emailProviders.id, id))
       .returning();
   }
 

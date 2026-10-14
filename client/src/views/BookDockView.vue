@@ -14,6 +14,7 @@ import { useBookDockUpload, SUPPORTED_FORMATS, SUPPORTED_FORMATS_ACCEPT } from '
 import { useBookDockConflicts } from '@/features/book-dock/composables/useBookDockConflicts'
 import { refetchBookDockMetadata } from '@/features/book-dock/api/book-dock.api'
 import BookDockActionCluster from '@/features/book-dock/components/BookDockActionCluster.vue'
+import BookDockUploadFailures from '@/features/book-dock/components/BookDockUploadFailures.vue'
 import BookDockFilterBar from '@/features/book-dock/components/BookDockFilterBar.vue'
 import BookDockFileListView from '@/features/book-dock/components/BookDockFileListView.vue'
 import BookDockListBar from '@/features/book-dock/components/BookDockListBar.vue'
@@ -435,16 +436,9 @@ function onDrop(e: DragEvent) {
   e.preventDefault()
   dragCounter = 0
   dragOver.value = false
+  // Unsupported files go through too, so the upload failures panel can say why they were refused.
   const files = e.dataTransfer?.files
-  if (files?.length) {
-    const valid = [...files].filter((f) => {
-      const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
-      return SUPPORTED_FORMATS.includes(ext)
-    })
-    if (valid.length) {
-      addFiles(valid)
-    }
-  }
+  if (files?.length) addFiles(files)
 }
 
 watch(isUploading, (uploading, was) => {
@@ -570,6 +564,8 @@ onUnmounted(() => {
             />
           </div>
         </div>
+
+        <BookDockUploadFailures />
 
         <BookDockFilterBar :active-view="activeView" :summary="summary" @view="setView" @search="setSearch" />
 

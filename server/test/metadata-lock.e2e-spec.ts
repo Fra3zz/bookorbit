@@ -1,6 +1,10 @@
 import { randomUUID } from 'crypto';
-import { readFile } from 'fs/promises';
+import { readFile, rename } from 'fs/promises';
+import { join } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { MetadataProviderKey } from '@bookorbit/types';
+
+import { MetadataPreferencesService } from '../src/modules/metadata-preferences/metadata-preferences.service';
 
 import { buildMetadataLockCandidates } from './e2e/metadata-lock/metadata-lock-test-providers';
 import {
@@ -28,6 +32,16 @@ describe('metadata-lock e2e', { timeout: 30_000 }, () => {
 
   beforeAll(async () => {
     ctx = await createMetadataLockE2EContext();
+    // The stand-in Goodreads answers every field, the audiobook ones included, while the default
+    // rules for those name only the audiobook sources that really carry them, and keep a measured
+    // duration. These tests are about locks, so those rules say what the others do: overwrite
+    // whatever is not locked, from the one source that answers.
+    const preferences = ctx.app.get(MetadataPreferencesService);
+    const global = await preferences.getGlobal();
+    for (const field of ['narrators', 'duration', 'abridged'] as const) {
+      global.fields[field] = { enabled: true, providers: [MetadataProviderKey.GOODREADS], mergeStrategy: 'overwriteIfProvided' };
+    }
+    await preferences.setGlobal(global);
   }, 120_000);
 
   afterAll(async () => {
@@ -378,6 +392,53 @@ describe('metadata-lock e2e', { timeout: 30_000 }, () => {
     await expect(readFile(extractedCoverPath!)).resolves.toEqual(BLUE_PNG_BYTES);
   }, 60_000);
 
+  it('imports ComicInfo Genre and Tags as separate genres and tags on scan', async () => {
+    const library = await createLibraryWithFolder(ctx, {
+      mode: 'book_per_file',
+      allowedFormats: ['cbz'],
+      name: `metadata-lock-comic-tags-${randomUUID()}`,
+    });
+    const folder = `comic-tags-${randomUUID()}`;
+    await createCbzFixture(library.folderPath, `${folder}/tagged.cbz`, { title: 'Tagged Comic', genre: 'Science Fiction', tags: 'Foo, Bar' });
+    await createCbzFixture(library.folderPath, `${folder}/tags-only.cbz`, { title: 'Tags Only Comic', tags: 'Ninja, School Life' });
+    await triggerAndWaitForLibraryScan(ctx, library.libraryId);
+
+    const tagged = await locateBookFileByRelPath(ctx, library.libraryId, `${folder}/tagged.cbz`);
+    const tagsOnly = await locateBookFileByRelPath(ctx, library.libraryId, `${folder}/tags-only.cbz`);
+
+    await expect(readBookMutationState(ctx, tagged.bookId)).resolves.toMatchObject({ genres: ['Science Fiction'], tags: ['Bar', 'Foo'] });
+    await expect(readBookMutationState(ctx, tagsOnly.bookId)).resolves.toMatchObject({ genres: [], tags: ['Ninja', 'School Life'] });
+  });
+
+  it('replaces comic genres and tags from a re-tagged file on rescan, except locked tags', async () => {
+    const library = await createLibraryWithFolder(ctx, {
+      mode: 'book_per_file',
+      allowedFormats: ['cbz'],
+      name: `metadata-lock-comic-retag-${randomUUID()}`,
+    });
+    const folder = `comic-retag-${randomUUID()}`;
+    const lockedRelPath = `${folder}/locked.cbz`;
+    const unlockedRelPath = `${folder}/unlocked.cbz`;
+    await createCbzFixture(library.folderPath, lockedRelPath, { title: 'Locked Tags Comic', genre: 'Science Fiction', tags: 'Time Travel' });
+    await createCbzFixture(library.folderPath, unlockedRelPath, { title: 'Unlocked Tags Comic', genre: 'Science Fiction', tags: 'Time Travel' });
+    await triggerAndWaitForLibraryScan(ctx, library.libraryId);
+
+    const locked = await locateBookFileByRelPath(ctx, library.libraryId, lockedRelPath);
+    const unlocked = await locateBookFileByRelPath(ctx, library.libraryId, unlockedRelPath);
+    expect((await patchLocks(locked.bookId, ['tags'])).statusCode).toBe(200);
+
+    // Filesystem timestamp resolution is 1s on many OSes; wait so the re-tagged files get a newer mtime.
+    await pause(1_100);
+    await retagComic(library.folderPath, lockedRelPath, { title: 'Locked Tags Comic', tags: 'Found Family' });
+    await retagComic(library.folderPath, unlockedRelPath, { title: 'Unlocked Tags Comic', tags: 'Found Family' });
+    await triggerAndWaitForLibraryScan(ctx, library.libraryId);
+
+    expect((await locateBookFileByRelPath(ctx, library.libraryId, lockedRelPath)).bookId).toBe(locked.bookId);
+    expect((await locateBookFileByRelPath(ctx, library.libraryId, unlockedRelPath)).bookId).toBe(unlocked.bookId);
+    await expect(readBookMutationState(ctx, locked.bookId)).resolves.toMatchObject({ genres: [], tags: ['Time Travel'] });
+    await expect(readBookMutationState(ctx, unlocked.bookId)).resolves.toMatchObject({ genres: [], tags: ['Found Family'] });
+  }, 60_000);
+
   it('refreshes extracted covers only for unlocked books during scanner cover refresh', async () => {
     const library = await createLibraryWithFolder(ctx, {
       mode: 'book_per_file',
@@ -483,6 +544,14 @@ describe('metadata-lock e2e', { timeout: 30_000 }, () => {
       bookId: located.bookId,
       absolutePath: located.absolutePath,
     };
+  }
+
+  // Taggers write a new archive and rename it over the old one. The rename moves the folder's mtime,
+  // which is what makes an incremental scan look inside the folder again.
+  async function retagComic(folderPath: string, relPath: string, input: Parameters<typeof createCbzFixture>[2]) {
+    const stagingRelPath = `${relPath}.retag`;
+    await createCbzFixture(folderPath, stagingRelPath, input);
+    await rename(join(folderPath, stagingRelPath), join(folderPath, relPath));
   }
 
   function uniqueRelPath(prefix: string, fileName: string): string {

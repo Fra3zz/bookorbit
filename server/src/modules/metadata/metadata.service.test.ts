@@ -1865,6 +1865,113 @@ describe('MetadataService', () => {
     expect(updateSet).toHaveBeenCalledWith({ durationSeconds: 4321 });
   });
 
+  it('extractAudioFileDuration returns the duration it wrote, or null when the file cannot be read', async () => {
+    const { db } = makeDb();
+    const service = makeService(db);
+
+    mockParseAudioDuration.mockResolvedValueOnce(null).mockResolvedValueOnce(4321);
+
+    await expect(service.extractAudioFileDuration(99, '/tmp/book.m4b')).resolves.toBeNull();
+    await expect(service.extractAudioFileDuration(99, '/tmp/book.m4b')).resolves.toBe(4321);
+  });
+
+  describe('measureMissingAudioDurations', () => {
+    function makeDurationDb(missing: Array<{ absolutePath: string }>) {
+      const selectWhere = vi.fn().mockResolvedValue(missing);
+      const updateWhere = vi.fn().mockResolvedValue(undefined);
+      const updateSet = vi.fn().mockReturnValue({ where: updateWhere });
+      const db = {
+        select: vi.fn().mockReturnValue({ from: vi.fn().mockReturnValue({ where: selectWhere }) }),
+        update: vi.fn().mockReturnValue({ set: updateSet }),
+      };
+      return { db, selectWhere, updateSet, updateWhere };
+    }
+
+    it('looks only at the audio content files of the book that have no positive duration', async () => {
+      const { db, selectWhere } = makeDurationDb([]);
+      const service = makeService(db);
+
+      await service.measureMissingAudioDurations(42);
+
+      const query = new PgDialect().sqlToQuery(selectWhere.mock.calls[0]![0]);
+      expect(query.params).toEqual([42, 'content', 'm4b', 'mp3', 'm4a', 'opus', 'ogg', 'flac', 0]);
+      expect(query.sql).toMatch(/"duration_seconds" is null or "book_files"\."duration_seconds" <= \$9/);
+    });
+
+    it('measures each file, then re-totals the book from the durations it wrote', async () => {
+      const { db, updateSet, updateWhere } = makeDurationDb([{ absolutePath: '/books/a/01.mp3' }, { absolutePath: '/books/a/02.mp3' }]);
+      const service = makeService(db);
+      mockParseAudioDuration.mockImplementation((path) => Promise.resolve(path.endsWith('01.mp3') ? 600 : 900));
+      const aggregate = vi.spyOn(service, 'aggregateAudioDuration').mockResolvedValue(undefined);
+
+      await expect(service.measureMissingAudioDurations(42)).resolves.toEqual({ measured: 2, failed: 0 });
+
+      expect(mockParseAudioDuration.mock.calls.map((call) => call[0]).sort()).toEqual(['/books/a/01.mp3', '/books/a/02.mp3']);
+      expect(updateSet.mock.calls.map((call) => call[0]).sort((a, b) => a.durationSeconds - b.durationSeconds)).toEqual([
+        { durationSeconds: 600 },
+        { durationSeconds: 900 },
+      ]);
+      expect(aggregate).toHaveBeenCalledExactlyOnceWith(42);
+      expect(aggregate.mock.invocationCallOrder[0]!).toBeGreaterThan(Math.max(...updateWhere.mock.invocationCallOrder));
+    });
+
+    it('leaves the total alone when a file cannot be measured, so the rest cannot shrink it', async () => {
+      const { db, updateSet } = makeDurationDb([{ absolutePath: '/books/a/01.mp3' }, { absolutePath: '/books/a/02.mp3' }]);
+      const service = makeService(db);
+      mockParseAudioDuration.mockImplementation((path) => Promise.resolve(path.endsWith('01.mp3') ? 600 : null));
+      const aggregate = vi.spyOn(service, 'aggregateAudioDuration').mockResolvedValue(undefined);
+
+      await expect(service.measureMissingAudioDurations(42)).resolves.toEqual({ measured: 1, failed: 1 });
+
+      expect(updateSet).toHaveBeenCalledExactlyOnceWith({ durationSeconds: 600 });
+      expect(aggregate).not.toHaveBeenCalled();
+    });
+
+    it('treats a duration that rounds to zero as unmeasured', async () => {
+      const { db } = makeDurationDb([{ absolutePath: '/books/a/blip.m4b' }]);
+      const service = makeService(db);
+      mockParseAudioDuration.mockResolvedValue(0);
+      const aggregate = vi.spyOn(service, 'aggregateAudioDuration').mockResolvedValue(undefined);
+
+      await expect(service.measureMissingAudioDurations(42)).resolves.toEqual({ measured: 0, failed: 1 });
+
+      expect(aggregate).not.toHaveBeenCalled();
+    });
+
+    it('probes nothing and keeps the total for a book with no missing durations', async () => {
+      const { db } = makeDurationDb([]);
+      const service = makeService(db);
+      const aggregate = vi.spyOn(service, 'aggregateAudioDuration').mockResolvedValue(undefined);
+
+      await expect(service.measureMissingAudioDurations(42)).resolves.toEqual({ measured: 0, failed: 0 });
+
+      expect(mockParseAudioDuration).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+      expect(aggregate).not.toHaveBeenCalled();
+    });
+
+    it('probes at most four files at a time', async () => {
+      const tracks = Array.from({ length: 10 }, (_, index) => ({ absolutePath: `/books/a/${String(index + 1).padStart(2, '0')}.mp3` }));
+      const { db } = makeDurationDb(tracks);
+      const service = makeService(db);
+      let inFlight = 0;
+      let peak = 0;
+      mockParseAudioDuration.mockImplementation(async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        inFlight--;
+        return 60;
+      });
+      vi.spyOn(service, 'aggregateAudioDuration').mockResolvedValue(undefined);
+
+      await expect(service.measureMissingAudioDurations(42)).resolves.toEqual({ measured: 10, failed: 0 });
+
+      expect(peak).toBe(4);
+      expect(mockParseAudioDuration).toHaveBeenCalledTimes(10);
+    });
+  });
+
   it('extractAndAggregateAudioDuration writes the per-file duration before re-aggregating the total', async () => {
     const { db } = makeDb();
     const service = makeService(db);
@@ -1872,7 +1979,7 @@ describe('MetadataService', () => {
     const callOrder: string[] = [];
     const extractSpy = vi.spyOn(service, 'extractAudioFileDuration').mockImplementation(() => {
       callOrder.push('extract');
-      return Promise.resolve();
+      return Promise.resolve(null);
     });
     const aggregateSpy = vi.spyOn(service, 'aggregateAudioDuration').mockImplementation(() => {
       callOrder.push('aggregate');

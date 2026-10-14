@@ -89,7 +89,7 @@ export class OpenAiCompatibleProvider implements ITtsProvider {
     this.supportsVoiceDiscovery = config.supportsVoiceDiscovery ?? true;
   }
 
-  async synthesize(text: string, voiceId: string, speed: number, format: string): Promise<Buffer> {
+  async synthesize(text: string, voiceId: string, speed: number, format: string, signal?: AbortSignal): Promise<Buffer> {
     const event = 'tts.openai.synthesize';
     const startMs = Date.now();
     this.logger.log(
@@ -107,6 +107,7 @@ export class OpenAiCompatibleProvider implements ITtsProvider {
         method: 'POST',
         headers: this.buildHeaders(),
         body: JSON.stringify(body),
+        signal,
       });
       if (!response.ok) {
         const errText = await response.text().catch(() => '');
@@ -119,6 +120,12 @@ export class OpenAiCompatibleProvider implements ITtsProvider {
       );
       return result;
     } catch (err) {
+      if (signal?.aborted) {
+        this.logger.log(
+          `[${event}] [end] providerId=${this.providerId} voiceId=${voiceId} durationMs=${Date.now() - startMs} outcome=cancelled - openai-compatible synthesis cancelled`,
+        );
+        throw err;
+      }
       const errorClass = err instanceof Error ? err.constructor.name : 'UnknownError';
       const error = err instanceof Error ? sanitizeLogValue(err.message) : 'unknown';
       this.logger.error(

@@ -3,6 +3,7 @@ import type { ReadingAttemptService } from '../user-book-status/reading-attempt.
 import { BadRequestException, Logger } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { buildHardcoverMatchBasis } from './hardcover-id.utils';
 import { HardcoverImportService } from './hardcover-import.service';
 
 const mockRepo = {
@@ -508,6 +509,8 @@ describe('HardcoverImportService', () => {
         hardcoverUserBookId: 1000,
         hardcoverReadId: 501,
         matchMethod: 'isbn',
+        // Recorded so the first sync does not second-guess a link the import just made.
+        matchBasis: buildHardcoverMatchBasis(localBook()),
         lastSyncedStatus: 'read',
         lastSyncedProgress: null,
       }),
@@ -920,16 +923,19 @@ describe('HardcoverImportService', () => {
     const service = makeService(attempts as never);
     const preview = await service.previewImport(user as never);
     vi.spyOn(service as any, 'buildPreview').mockResolvedValue({
-      ...preview,
-      rows: Array.from({ length: 121 }, (_, index) => ({
-        ...preview.rows[0],
-        hardcoverUserBookId: 1000 + index,
-        localBookId: 42 + index,
-        hardcoverReads: [
-          { id: index * 2 + 1, startedAt: null, finishedAt: '2026-01-15' },
-          { id: index * 2 + 2, startedAt: null, finishedAt: '2026-01-16' },
-        ],
-      })),
+      preview: {
+        ...preview,
+        rows: Array.from({ length: 121 }, (_, index) => ({
+          ...preview.rows[0],
+          hardcoverUserBookId: 1000 + index,
+          localBookId: 42 + index,
+          hardcoverReads: [
+            { id: index * 2 + 1, startedAt: null, finishedAt: '2026-01-15' },
+            { id: index * 2 + 2, startedAt: null, finishedAt: '2026-01-16' },
+          ],
+        })),
+      },
+      matchBasisByBookId: new Map(),
     });
     mockUserBookStatusService.updateManual.mockImplementation(() => {
       events.notifyChanged(7);

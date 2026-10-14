@@ -4,6 +4,7 @@ vi.mock('fs/promises', async () => {
 });
 
 vi.mock('../scanner/lib/hash', () => ({ computeFileHash: vi.fn() }));
+vi.mock('../../db/audio-track-order', () => ({ realignAudioTrackOrder: vi.fn() }));
 
 vi.mock('../metadata/lib/epub', () => ({ extractEpubMetadata: vi.fn() }));
 vi.mock('../metadata/lib/cbz-metadata', () => ({ extractCbzMetadata: vi.fn(), extractCbrMetadata: vi.fn(), extractCb7Metadata: vi.fn() }));
@@ -18,11 +19,13 @@ import { extractCbzMetadata } from '../metadata/lib/cbz-metadata';
 import { parseMobiFile } from '../metadata/lib/mobi-parser';
 import { parsePdfFile } from '../metadata/lib/pdf-parser';
 import { computeFileHash } from '../scanner/lib/hash';
+import { realignAudioTrackOrder } from '../../db/audio-track-order';
 import { books } from '../../db/schema';
 
 import { UploadService } from './upload.service';
 
 const mockFsAccess = fsAccess as MockedFunction<typeof fsAccess>;
+const mockRealignAudioTrackOrder = realignAudioTrackOrder as MockedFunction<typeof realignAudioTrackOrder>;
 const mockLstat = lstat as MockedFunction<typeof lstat>;
 const mockReaddir = readdir as MockedFunction<typeof readdir>;
 const mockStat = stat as MockedFunction<typeof stat>;
@@ -1210,6 +1213,26 @@ describe('UploadService', () => {
 
       expect(processor.extractAudioDurationAsync).toHaveBeenCalledWith(10, '/library/Book Title/chapter-02.mp3', 'mp3');
       expect(processor.reconcileCoversAsync).toHaveBeenCalledWith([10]);
+    });
+
+    it('places an added track by its name before the transaction commits, instead of after every other track', async () => {
+      validator.sanitizeFilename.mockReturnValue('chapter-02.mp3');
+      validator.validateFormat.mockReturnValue('mp3');
+      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+
+      await service.addFileToBook(10, 'chapter-02.mp3', {} as any, user);
+
+      expect(mockRealignAudioTrackOrder).toHaveBeenCalledTimes(1);
+      expect(mockRealignAudioTrackOrder).toHaveBeenCalledWith(tx, 10);
+      expect(mockRealignAudioTrackOrder.mock.invocationCallOrder[0]).toBeGreaterThan(insertValues.mock.invocationCallOrder[0]!);
+    });
+
+    it('leaves track order alone when the added file is not audio', async () => {
+      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+
+      await service.addFileToBook(10, 'book.epub', {} as any, user);
+
+      expect(mockRealignAudioTrackOrder).not.toHaveBeenCalled();
     });
 
     it('schedules audio chapter extraction when an M4B is added to an EPUB-primary book', async () => {

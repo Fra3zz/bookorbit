@@ -82,6 +82,7 @@ const METADATA_ROUTES: Record<MetadataTab, string> = {
   score: 'settings-metadata-score',
   'auto-fetch': 'settings-metadata-auto-fetch',
   authors: 'settings-metadata-authors',
+  'search-cache': 'settings-metadata-search-cache',
   'genre-blocklist': 'settings-metadata-genre-blocklist',
 }
 
@@ -394,6 +395,17 @@ export const routes: RouteRecordRaw[] = [
             meta: { maxWidth: 'max-w-3xl', title: () => t('titles.metadata.authors') },
           },
           {
+            path: 'metadata/search-cache',
+            name: 'settings-metadata-search-cache',
+            component: () => import('@/features/settings/metadata-cache/MetadataCacheSettings.vue'),
+            meta: {
+              maxWidth: 'max-w-5xl',
+              requiredPermission: Permission.ManageMetadataConfig,
+              permissionFallback: 'settings-metadata-reminders',
+              title: () => t('titles.metadata.search-cache'),
+            },
+          },
+          {
             path: 'metadata/genre-blocklist',
             name: 'settings-metadata-genre-blocklist',
             component: () => import('@/features/settings/metadata-preferences/MetadataGenreBlocklistSettings.vue'),
@@ -437,7 +449,7 @@ export const routes: RouteRecordRaw[] = [
             path: 'email',
             name: 'settings-email',
             component: () => import('@/features/email/components/EmailSettings.vue'),
-            meta: { maxWidth: 'max-w-3xl', title: resolveEmailTitle },
+            meta: { maxWidth: 'max-w-[72rem]', title: resolveEmailTitle },
           },
           {
             path: 'hardcover',

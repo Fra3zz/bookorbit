@@ -1,16 +1,19 @@
 vi.mock('fs/promises', () => ({ stat: vi.fn() }));
 vi.mock('../scanner/lib/hash', () => ({ computeFileHash: vi.fn() }));
+vi.mock('../../db/audio-track-order', () => ({ realignAudioTrackOrder: vi.fn() }));
 
 import { InternalServerErrorException } from '@nestjs/common';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { stat } from 'fs/promises';
 import { computeFileHash } from '../scanner/lib/hash';
+import { realignAudioTrackOrder } from '../../db/audio-track-order';
 import { books, bookFiles, bookMetadata, uploadSessions } from '../../db/schema';
 import { UploadProcessorService } from './upload-processor.service';
 
 const mockStat = stat as MockedFunction<typeof stat>;
 const mockComputeFileHash = computeFileHash as MockedFunction<typeof computeFileHash>;
+const mockRealignAudioTrackOrder = realignAudioTrackOrder as MockedFunction<typeof realignAudioTrackOrder>;
 
 describe('UploadProcessorService', () => {
   const metadataService = {
@@ -170,6 +173,24 @@ describe('UploadProcessorService', () => {
       }),
     );
     expect(orchestrator.scheduleImportedBooksIfEligible).not.toHaveBeenCalled();
+  });
+
+  it('renumbers the tracks of the book an audio file joins, inside the same transaction', async () => {
+    selectLimit.mockResolvedValueOnce([{ id: 99, primaryFileId: 5, status: 'present', formatPriority: ['mp3'] }]);
+
+    await service.createBookRecord(1, 2, '/folder', '/folder/Part 03.mp3', 'book/Part 03.mp3', 'mp3', 5000);
+
+    expect(mockRealignAudioTrackOrder).toHaveBeenCalledTimes(1);
+    expect(mockRealignAudioTrackOrder).toHaveBeenCalledWith(tx, 99);
+    expect(mockRealignAudioTrackOrder.mock.invocationCallOrder[0]).toBeGreaterThan(insertBookFilesValues.mock.invocationCallOrder[0]!);
+  });
+
+  it('leaves track order alone for an audio file that starts a book, or a file that is not audio', async () => {
+    await service.createBookRecord(1, 2, '/folder', '/folder/Part 01.mp3', 'book/Part 01.mp3', 'mp3', 5000);
+    selectLimit.mockResolvedValueOnce([{ id: 99, primaryFileId: 5, status: 'present', formatPriority: ['mp3'] }]);
+    await service.createBookRecord(1, 2, '/folder', '/folder/book.epub', 'book/book.epub', 'epub', 5000);
+
+    expect(mockRealignAudioTrackOrder).not.toHaveBeenCalled();
   });
 
   it('preserves oversized MergerFS inode values before persisting', async () => {
@@ -456,6 +477,44 @@ describe('UploadProcessorService', () => {
 
       expect(mockComputeFileHash).toHaveBeenCalledTimes(2);
       expect(db.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('renumbers the tracks of each book that received audio once every file of the unit is in', async () => {
+      insertBooksReturning.mockResolvedValueOnce([{ id: 42 }]);
+      selectLimit
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 42 }])
+        .mockResolvedValueOnce([]);
+
+      await service.createUnitBookRecords(1, 2, unitFiles);
+
+      expect(mockRealignAudioTrackOrder).toHaveBeenCalledTimes(1);
+      expect(mockRealignAudioTrackOrder).toHaveBeenCalledWith(tx, 42);
+      expect(mockRealignAudioTrackOrder.mock.invocationCallOrder[0]).toBeGreaterThan(Math.max(...insertBookFilesValues.mock.invocationCallOrder));
+    });
+
+    it('renumbers a book the unit joined, whose tracks the unit numbered from zero', async () => {
+      selectLimit.mockResolvedValueOnce([{ id: 99, primaryFileId: 5, status: 'present', formatPriority: ['mp3'] }]).mockResolvedValueOnce([]);
+
+      await service.createUnitBookRecords(1, 2, [{ ...unitFiles[0]!, sortOrder: 0 }]);
+
+      expect(mockRealignAudioTrackOrder).toHaveBeenCalledWith(tx, 99);
+    });
+
+    it('does not renumber a book that only received files that are not audio', async () => {
+      selectLimit.mockResolvedValueOnce([{ id: 99, primaryFileId: 5, status: 'present', formatPriority: ['epub'] }]).mockResolvedValueOnce([]);
+
+      await service.createUnitBookRecords(1, 2, [
+        { folderPath: '/library/Book', absolutePath: '/library/Book/book.epub', relPath: 'Book/book.epub', format: 'epub', sizeBytes: 10 },
+      ]);
+
+      expect(mockRealignAudioTrackOrder).not.toHaveBeenCalled();
+    });
+
+    it('rolls the whole unit back when the renumbering fails', async () => {
+      mockRealignAudioTrackOrder.mockRejectedValueOnce(new Error('deadlock detected'));
+
+      await expect(service.createUnitBookRecords(1, 2, unitFiles)).rejects.toThrow('deadlock detected');
     });
 
     it('refuses an empty unit rather than creating a book with no files', async () => {

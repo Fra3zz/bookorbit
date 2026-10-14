@@ -107,19 +107,19 @@ describe('TtsService', () => {
       repo.findProviderById.mockResolvedValue(DB_PROVIDER);
       await service.synthesize({ providerId: '1', voiceId: 'alloy', text: 'Hello', speed: 1.0 });
       expect(factory.getOpenAiProvider).toHaveBeenCalledWith(DB_PROVIDER);
-      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'alloy', 1.0, 'Hello', 'mp3');
+      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'alloy', 1.0, 'Hello', 'mp3', undefined);
     });
 
     it('should trim voiceId before synthesis', async () => {
       repo.findProviderById.mockResolvedValue(DB_PROVIDER);
       await service.synthesize({ providerId: '1', voiceId: '  alloy  ', text: 'Hello', speed: 1.0 });
-      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'alloy', 1.0, 'Hello', 'mp3');
+      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'alloy', 1.0, 'Hello', 'mp3', undefined);
     });
 
     it('should fall back to the first listed voice when voiceId is missing', async () => {
       repo.findProviderById.mockResolvedValue(DB_PROVIDER);
       await service.synthesize({ providerId: '1', voiceId: '', text: 'Hello', speed: 1.0 });
-      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'alloy', 1.0, 'Hello', 'mp3');
+      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'alloy', 1.0, 'Hello', 'mp3', undefined);
     });
 
     it('should throw NotFoundException when no fallback voices are available', async () => {
@@ -295,7 +295,7 @@ describe('TtsService', () => {
     it('synthesizes a curated voice', async () => {
       curateProvider();
       await service.synthesize({ providerId: '1', voiceId: 'af_heart', text: 'Hello', speed: 1.0 });
-      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'af_heart', 1.0, 'Hello', 'mp3');
+      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'af_heart', 1.0, 'Hello', 'mp3', undefined);
     });
 
     it('rejects a voice curation has withdrawn', async () => {
@@ -313,7 +313,7 @@ describe('TtsService', () => {
     it('accepts any voice id when the provider is not curated', async () => {
       repo.findProviderById.mockResolvedValue({ ...DB_PROVIDER, staticVoices: null });
       await service.synthesize({ providerId: '1', voiceId: 'af_sky+af_bella', text: 'Hello', speed: 1.0 });
-      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'af_sky+af_bella', 1.0, 'Hello', 'mp3');
+      expect(synthesis.synthesize).toHaveBeenCalledWith(OPENAI_PROVIDER_MOCK, '1', 'af_sky+af_bella', 1.0, 'Hello', 'mp3', undefined);
     });
 
     it('clears a withdrawn voice from saved preferences', async () => {

@@ -4,7 +4,7 @@ import { NotificationType, UNSETTLED_BOOK_REQUEST_DOWNLOAD_STATUSES, WORKER_WRIT
 import type { RequestUser } from '../../../common/types/request-user';
 import type { BookRequestDownloadRow, BookRequestRow } from '../../../db/schema';
 import { newznabClientKey } from '../indexers/adapters/newznab.adapter';
-import { IndexerSearchException } from '../indexers/indexer-adapter';
+import { IndexerRetryExhaustedException, IndexerSearchException } from '../indexers/indexer-adapter';
 import { RequestFulfillmentService } from './request-fulfillment.service';
 
 const INFO_HASH = 'c9e15763f722f23e98a29decdfae341b98d53056';
@@ -468,6 +468,24 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
     );
   });
 
+  it.each([true, false])('does not restart an exhausted NZB retry budget (automated=%s)', async (automated) => {
+    const exhausted = new IndexerRetryExhaustedException('throttled', 'The indexer is still rate limiting us');
+    const fetchNzbFile = vi.fn().mockRejectedValue(exhausted);
+    const { service, downloads, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: { resolveConfig: vi.fn().mockResolvedValue({ id: 9, name: 'usenet', adapterType: 'newznab' }) },
+      indexerAdapter: { fetchNzbFile },
+    });
+
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, automated ? null : user())).rejects.toMatchObject({
+      response: { errorCode: 'GRAB_SOURCE_UNAVAILABLE', statusCode: 503 },
+      cause: exhausted,
+    });
+    expect(fetchNzbFile).toHaveBeenCalledTimes(1);
+    expect(downloads.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ source: 'nzb_file', status: 'failed', automated }));
+    expect(adapter.add).not.toHaveBeenCalled();
+  });
+
   it('inspects the torrent without creating an attempt and reuses it for the following grab', async () => {
     const { service, downloads, adapter, indexerAdapter } = makeService({
       releases: { find: vi.fn().mockReturnValue(RELEASE) },
@@ -758,6 +776,47 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
     const payload = adapter.add.mock.calls[0]?.[0];
     expect(payload).not.toHaveProperty('seedRatioGoal');
     expect(payload).toHaveProperty('seedTimeMinutes', 90);
+  });
+
+  it.each([
+    { transport: 'torrent', inspected: false },
+    { transport: 'torrent', inspected: true },
+    { transport: 'magnet', inspected: false },
+    { transport: 'magnet', inspected: true },
+  ])('omits both tracker limits for a disabled source ($transport, inspected=$inspected)', async ({ transport, inspected }) => {
+    const fetchTorrentFile = vi.fn().mockResolvedValue(torrentBytes());
+    const resolveSeedPolicy = vi.fn().mockResolvedValue({
+      id: 9,
+      adapterType: 'torznab',
+      seedsBack: true,
+      applyTrackerSeedGoals: true,
+      seedRatioGoal: null,
+      seedTimeMinutes: null,
+    });
+    const { service, adapter } = makeService({
+      releases: {
+        find: vi.fn().mockReturnValue({ ...RELEASE, seedRatioGoal: 1, seedTimeMinutes: 4320, ...(transport === 'magnet' ? { magnet: MAGNET } : {}) }),
+      },
+      indexers: { resolveSeedPolicy },
+      indexerAdapter: { fetchTorrentFile },
+    });
+
+    if (inspected) await service.inspectRelease(7, { indexerId: 9, releaseGuid: 'r-1' });
+    resolveSeedPolicy.mockResolvedValue({
+      id: 9,
+      adapterType: 'torznab',
+      seedsBack: true,
+      applyTrackerSeedGoals: false,
+      seedRatioGoal: null,
+      seedTimeMinutes: null,
+    });
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
+
+    expect(resolveSeedPolicy).toHaveBeenCalledExactlyOnceWith(9);
+    expect(adapter.add).toHaveBeenCalledTimes(1);
+    expect(adapter.add.mock.calls[0]?.[0]).not.toHaveProperty('seedRatioGoal');
+    expect(adapter.add.mock.calls[0]?.[0]).not.toHaveProperty('seedTimeMinutes');
+    expect(fetchTorrentFile).toHaveBeenCalledTimes(transport === 'torrent' ? 1 : 0);
   });
 
   it('uses current policy after an inspection cache hit without fetching bytes again', async () => {

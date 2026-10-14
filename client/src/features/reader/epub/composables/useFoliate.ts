@@ -1,9 +1,11 @@
 import { onUnmounted, ref } from 'vue'
 import { api, getAccessToken } from '@/lib/api'
+import { i18n } from '@/i18n'
 import { useFoliateAnnotations } from './useFoliateAnnotations'
 import { useFoliateSelection } from './useFoliateSelection'
 import { useFoliateInput } from './useFoliateInput'
 import { ensureMediaOverlayActiveClass } from '../../media-overlay/lib/media-overlay-highlight'
+import { scalePublisherFontSizes } from '../lib/publisher-font-sizes'
 import type { EpubBookInfo, EpubReaderSettings } from '@bookorbit/types'
 
 export interface RelocateDetail {
@@ -89,7 +91,6 @@ export interface FoliateOpenOptions extends EpubOpenOptions {
   fallbackFraction?: number
   mediaOverlayFragment?: string | null
   mediaOverlaySectionIndex?: number | null
-  preferMediaOverlay?: boolean
 }
 
 export function useFoliate(
@@ -277,7 +278,7 @@ export function useFoliate(
 
       loadTimeoutId = setTimeout(() => {
         if (loading.value) {
-          error.value = 'Could not open the book. Your browser may not fully support the reader. Try refreshing or using a different browser.'
+          error.value = i18n.global.t('reader.bookLoadTimeout')
           loading.value = false
         }
       }, 30_000)
@@ -307,6 +308,7 @@ export function useFoliate(
         applyEpubOpenOptions(book, options)
         shouldRestoreByFraction = isFixedLayoutBook(book)
         isFixedLayout.value = shouldRestoreByFraction
+        if (!shouldRestoreByFraction) scalePublisherFontSizes(book)
         await view.open(book as never)
       } else {
         const mimeType = format === 'pdf' ? 'application/pdf' : 'application/zip'
@@ -330,9 +332,6 @@ export function useFoliate(
       }
 
       let didNavigate = false
-      if (options.preferMediaOverlay && options.mediaOverlayFragment) {
-        didNavigate = await navigateTo(options.mediaOverlayFragment)
-      }
       if (!didNavigate && options.cfi && !shouldRestoreByFraction) {
         didNavigate = await navigateTo(options.cfi)
       }
@@ -345,6 +344,9 @@ export function useFoliate(
             didNavigate = false
           }
         }
+      }
+      if (!didNavigate && options.fallbackFraction === 0) {
+        didNavigate = await navigateTo(0)
       }
       if (!didNavigate && options.mediaOverlayFragment) {
         didNavigate = await navigateTo(options.mediaOverlayFragment)
@@ -360,7 +362,7 @@ export function useFoliate(
     } catch (e) {
       console.error('[useFoliate]', e)
       clearTimeout(loadTimeoutId)
-      error.value = e instanceof Error ? e.message : 'Failed to open book'
+      error.value = e instanceof Error && e.message ? e.message : i18n.global.t('reader.failedToLoadBook')
       loading.value = false
     }
   }

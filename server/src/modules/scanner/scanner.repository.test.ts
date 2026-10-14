@@ -445,6 +445,37 @@ describe('ScannerRepository', () => {
     expect(db.selectDistinctOn).not.toHaveBeenCalled();
   });
 
+  describe('realignAudioTrackOrder', () => {
+    it('renumbers the tracks inside a transaction that holds the book row', async () => {
+      const { repo, queues, db, chains } = makeRepo();
+      queues.select.push([{ id: 4 }]);
+      queues.select.push([
+        { id: 41, absolutePath: '/books/Book/Part 2.mp3', format: 'mp3', sortOrder: 0 },
+        { id: 42, absolutePath: '/books/Book/Part 1.mp3', format: 'mp3', sortOrder: 1 },
+      ]);
+
+      await expect(repo.realignAudioTrackOrder(4)).resolves.toBe(2);
+
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(chains.select[0]!.mocks.for).toHaveBeenCalledWith('update');
+      expect(chains.update).toHaveLength(1);
+      expect(chains.update[0]!.mocks.set).toHaveBeenCalledWith({ sortOrder: expect.anything() });
+    });
+
+    it('does not write when the tracks already play in path order', async () => {
+      const { repo, queues, chains } = makeRepo();
+      queues.select.push([{ id: 4 }]);
+      queues.select.push([
+        { id: 41, absolutePath: '/books/Book/Part 1.mp3', format: 'mp3', sortOrder: 0 },
+        { id: 42, absolutePath: '/books/Book/Part 2.mp3', format: 'mp3', sortOrder: 1 },
+      ]);
+
+      await expect(repo.realignAudioTrackOrder(4)).resolves.toBe(0);
+
+      expect(chains.update).toHaveLength(0);
+    });
+  });
+
   describe('remapAudioPositions', () => {
     it('moves audio bookmarks and progress percentages in one transaction, skipping finished books and unplaceable rows', async () => {
       const { repo, queues, db, chains } = makeRepo();

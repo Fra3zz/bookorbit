@@ -24,10 +24,7 @@ import { loggerConfig } from './common/logger.config';
 import { CommonModule } from './common/common.module';
 import { SeriesIdentityModule } from './common/series-identity.module';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
-import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
-import { LibraryAccessGuard } from './common/guards/library-access.guard';
-import { PermissionGuard } from './common/guards/permission.guard';
-import { SensitiveEndpointThrottlerGuard } from './common/guards/sensitive-endpoint-throttler.guard';
+import { GLOBAL_GUARDS } from './common/guards/global-guards';
 import { DbModule } from './db/db.module';
 import { AnnotationModule } from './modules/annotation/annotation.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
@@ -202,12 +199,6 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     WatchDownloadModule,
     PodcastModule,
   ],
-  providers: [
-    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
-    { provide: APP_GUARD, useClass: SensitiveEndpointThrottlerGuard },
-    { provide: APP_GUARD, useClass: JwtAuthGuard },
-    { provide: APP_GUARD, useClass: PermissionGuard },
-    { provide: APP_GUARD, useClass: LibraryAccessGuard },
-  ],
+  providers: [{ provide: APP_INTERCEPTOR, useClass: AuditInterceptor }, ...GLOBAL_GUARDS.map((useClass) => ({ provide: APP_GUARD, useClass }))],
 })
 export class AppModule {}

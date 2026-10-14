@@ -18,7 +18,7 @@ import { UserBookStatusService } from '../user-book-status/user-book-status.serv
 import { ReadingAttemptService } from '../user-book-status/reading-attempt.service';
 import { HARDCOVER_STATUS } from './hardcover.constants';
 import { HardcoverClientService } from './hardcover-client.service';
-import { parseHardcoverBookId } from './hardcover-id.utils';
+import { buildHardcoverMatchBasis, parseHardcoverBookId } from './hardcover-id.utils';
 import { HardcoverImportFuzzyIndex } from './hardcover-import-fuzzy-index';
 import { type HardcoverImportLocalBook, HardcoverRepository } from './hardcover.repository';
 import { HardcoverSettingsService } from './hardcover-settings.service';
@@ -150,7 +150,7 @@ export class HardcoverImportService {
     this.logger.log(`[hardcover.import_status] [start] userId=${user.id} mode=preview - import preview started`);
 
     try {
-      const preview = await this.buildPreview(user);
+      const { preview } = await this.buildPreview(user);
       this.logger.log(
         `[hardcover.import_status] [end] userId=${user.id} mode=preview durationMs=${Date.now() - startedAt} totalHardcoverBooks=${preview.summary.totalHardcoverBooks} willUpdate=${preview.summary.willUpdate} needsReview=${preview.summary.needsReview} conflicts=${preview.summary.conflicts} unmatched=${preview.summary.unmatched} skipped=${preview.summary.skipped} - import preview completed`,
       );
@@ -166,7 +166,7 @@ export class HardcoverImportService {
     this.logger.log(`[hardcover.import_status] [start] userId=${user.id} mode=apply - import apply started`);
 
     try {
-      const preview = await this.buildPreview(user);
+      const { preview, matchBasisByBookId } = await this.buildPreview(user);
       const selectedIds = payload.hardcoverUserBookIds ? new Set(payload.hardcoverUserBookIds) : null;
       const importProgress = payload.importProgress === true;
       let applied = 0;
@@ -212,6 +212,7 @@ export class HardcoverImportService {
               hardcoverUserBookId: row.hardcoverUserBookId,
               hardcoverReadId: row.hardcoverReadId,
               matchMethod: row.matchMethod,
+              matchBasis: matchBasisByBookId.get(row.localBookId) ?? null,
               matchError: null,
               syncError: null,
               lastSyncedAt: new Date(),
@@ -257,7 +258,7 @@ export class HardcoverImportService {
     }
   }
 
-  private async buildPreview(user: RequestUser): Promise<HardcoverImportPreview> {
+  private async buildPreview(user: RequestUser): Promise<{ preview: HardcoverImportPreview; matchBasisByBookId: Map<number, string> }> {
     const token = await this.settingsService.getTokenForUser(user.id);
     if (!token) {
       throw new BadRequestException('Hardcover sync is not available right now');
@@ -277,8 +278,8 @@ export class HardcoverImportService {
     const rows: HardcoverImportPreviewRow[] = [];
     for (const book of hardcoverBooks) rows.push(await this.buildPreviewRow(book, indexes));
     return {
-      summary: summarize(rows),
-      rows,
+      preview: { summary: summarize(rows), rows },
+      matchBasisByBookId: new Map(localBooks.map((book) => [book.bookId, buildHardcoverMatchBasis(book)])),
     };
   }
 

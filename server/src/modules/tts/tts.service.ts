@@ -46,10 +46,18 @@ export class TtsService {
 
   // ---- Synthesis ----
 
-  async synthesize(dto: SynthesizeDto): Promise<Buffer> {
+  async synthesize(dto: SynthesizeDto, signal?: AbortSignal): Promise<Buffer> {
     const resolved = await this.resolveProvider(dto.providerId);
     const voiceId = await this.resolveSynthesisVoiceId(dto.providerId, dto.voiceId, resolved);
-    return this.synthesisService.synthesize(resolved.provider, dto.providerId, voiceId, dto.speed, dto.text, dto.format ?? DEFAULT_TTS_AUDIO_FORMAT);
+    return this.synthesisService.synthesize(
+      resolved.provider,
+      dto.providerId,
+      voiceId,
+      dto.speed,
+      dto.text,
+      dto.format ?? DEFAULT_TTS_AUDIO_FORMAT,
+      signal,
+    );
   }
 
   /**

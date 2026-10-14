@@ -629,6 +629,136 @@ describe('Reading attempts main-flow simulation (docker e2e)', { timeout: TIMEOU
     expect(sync?.attemptsUpdatedAt ?? null).toBeNull();
   });
 
+  it('25a. moves a Hardcover link to another book and releases only its live read links', async () => {
+    const book = await createBook();
+    const attempts = ctx.app.get(ReadingAttemptService);
+    const hardcover = ctx.app.get(HardcoverRepository);
+    const finished = await attempts.createHistorical(adminUserId, book.bookId, {
+      startedOn: '2025-01-01',
+      endedOn: '2025-01-09',
+      outcome: 'completed',
+    });
+    const removed = await attempts.createHistorical(adminUserId, book.bookId, {
+      startedOn: '2025-02-01',
+      endedOn: '2025-02-09',
+      outcome: 'completed',
+    });
+    const otherProvider = await attempts.createHistorical(adminUserId, book.bookId, {
+      startedOn: '2025-03-01',
+      endedOn: '2025-03-09',
+      outcome: 'completed',
+    });
+    await hardcover.linkReadingAttempt(adminUserId, finished.id, 9601);
+    await hardcover.linkReadingAttempt(adminUserId, removed.id, 9602);
+    await attempts.delete(adminUserId, book.bookId, removed.id);
+    await ctx.db
+      .update(schema.readingAttempts)
+      .set({ externalProvider: 'storygraph', externalId: 'sg-1' })
+      .where(eq(schema.readingAttempts.id, otherProvider.id));
+    await hardcover.upsertBookState({
+      userId: adminUserId,
+      bookId: book.bookId,
+      hardcoverBookId: 1554702,
+      hardcoverEditionId: 31616496,
+      hardcoverUserBookId: 19544253,
+      hardcoverReadId: 9601,
+      matchMethod: 'cached',
+      matchBasis: '["hell-be-ok",null,null]',
+      syncOverride: 'included',
+      lastSyncedAt: new Date('2026-10-01T00:00:00Z'),
+      lastSyncedProgress: 13.82,
+    });
+
+    const released = await hardcover.relinkBook({
+      userId: adminUserId,
+      bookId: book.bookId,
+      hardcoverBookId: 2973670,
+      hardcoverEditionId: 33314466,
+      matchMethod: 'metadata_id',
+      matchBasis: '["ok-amen","9789146223856",null]',
+    });
+
+    expect(released).toBe(1);
+    await expect(hardcover.findBookState(adminUserId, book.bookId)).resolves.toMatchObject({
+      hardcoverBookId: 2973670,
+      hardcoverEditionId: 33314466,
+      hardcoverUserBookId: null,
+      hardcoverReadId: null,
+      matchMethod: 'metadata_id',
+      matchBasis: '["ok-amen","9789146223856",null]',
+      syncOverride: 'included',
+      lastSyncedAt: null,
+      lastSyncedProgress: 13.82,
+    });
+    const rows = await ctx.db.select().from(schema.readingAttempts).where(eq(schema.readingAttempts.bookId, book.bookId));
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get(finished.id)).toMatchObject({ externalProvider: null, externalId: null });
+    // The soft-deleted attempt stays a tombstone, and another provider's link is not ours to drop.
+    expect(byId.get(removed.id)).toMatchObject({ externalProvider: 'hardcover', externalId: '9602' });
+    expect(byId.get(otherProvider.id)).toMatchObject({ externalProvider: 'storygraph', externalId: 'sg-1' });
+    await expect(hardcover.findClaimedHardcoverReadIds(adminUserId, book.bookId)).resolves.toEqual([9602]);
+    await expect(hardcover.linkReadingAttempt(adminUserId, finished.id, 9603)).resolves.toBe('linked');
+  });
+
+  it('25b. releases one attempt link only while it still points at the rejected read', async () => {
+    const book = await createBook();
+    const attempts = ctx.app.get(ReadingAttemptService);
+    const hardcover = ctx.app.get(HardcoverRepository);
+    const attempt = await attempts.createHistorical(adminUserId, book.bookId, {
+      startedOn: '2025-04-01',
+      endedOn: '2025-04-09',
+      outcome: 'completed',
+    });
+    await hardcover.linkReadingAttempt(adminUserId, attempt.id, 9701);
+
+    await expect(hardcover.unlinkReadingAttempt(adminUserId, attempt.id, 9799)).resolves.toBe(false);
+    await expect(hardcover.findClaimedHardcoverReadIds(adminUserId, book.bookId)).resolves.toEqual([9701]);
+
+    await expect(hardcover.unlinkReadingAttempt(adminUserId, attempt.id, 9701)).resolves.toBe(true);
+    const [row] = await ctx.db.select().from(schema.readingAttempts).where(eq(schema.readingAttempts.id, attempt.id));
+    expect(row).toMatchObject({ externalProvider: null, externalId: null });
+  });
+
+  it('25c. lets a Hardcover link cleared down to its provider be claimed again', async () => {
+    const book = await createBook();
+    const attempts = ctx.app.get(ReadingAttemptService);
+    const hardcover = ctx.app.get(HardcoverRepository);
+    const halfCleared = await attempts.createHistorical(adminUserId, book.bookId, {
+      startedOn: '2025-05-01',
+      endedOn: '2025-05-09',
+      outcome: 'completed',
+    });
+    const otherProvider = await attempts.createHistorical(adminUserId, book.bookId, {
+      startedOn: '2025-06-01',
+      endedOn: '2025-06-09',
+      outcome: 'completed',
+    });
+    await ctx.db
+      .update(schema.readingAttempts)
+      .set({ externalProvider: 'hardcover', externalId: null })
+      .where(eq(schema.readingAttempts.id, halfCleared.id));
+    await ctx.db
+      .update(schema.readingAttempts)
+      .set({ externalProvider: 'storygraph', externalId: null })
+      .where(eq(schema.readingAttempts.id, otherProvider.id));
+
+    await expect(hardcover.linkReadingAttempt(adminUserId, halfCleared.id, 9801)).resolves.toBe('linked');
+    await expect(hardcover.linkReadingAttempt(adminUserId, otherProvider.id, 9802)).resolves.toBe('conflict');
+  });
+
+  it('25d. carries the metadata Hardcover edition into the sync snapshot', async () => {
+    const book = await createBook();
+    const hardcover = ctx.app.get(HardcoverRepository);
+    await ctx.db
+      .insert(schema.bookMetadata)
+      .values({ bookId: book.bookId, title: 'ok, amen', hardcoverId: 'ok-amen', hardcoverEditionId: '33314466' });
+
+    await expect(hardcover.findBookSyncData(adminUserId, book.bookId)).resolves.toMatchObject({
+      hardcoverMetadataId: 'ok-amen',
+      hardcoverEditionId: '33314466',
+    });
+  });
+
   it('26. lets lifecycle dates create and complete attempts through the status API', async () => {
     const startedOnly = await createBook();
     const startResponse = await patchStatus(startedOnly.bookId, { startedAt: '2026-01-10' });

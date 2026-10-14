@@ -54,7 +54,7 @@ async function handleRefresh() {
   <div class="flex items-center gap-0.5">
     <DropdownMenu>
       <DropdownMenuTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-7 w-7 rounded text-muted-foreground hover:text-foreground">
+        <Button variant="ghost" size="icon" class="h-7 w-7 rounded-xs text-muted-foreground hover:text-foreground">
           <MoreHorizontal :size="14" />
         </Button>
       </DropdownMenuTrigger>
@@ -104,6 +104,9 @@ async function handleRefresh() {
     v-if="showSendDialog"
     :selection-payload="{ bookIds: [book.id] }"
     :selected-count="1"
+    :book-files="book.files"
+    :book-title="book.title ?? undefined"
+    :book-authors="book.authors.join(', ') || undefined"
     :open="showSendDialog"
     @update:open="showSendDialog = $event"
   />

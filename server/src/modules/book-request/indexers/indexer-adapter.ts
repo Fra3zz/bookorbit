@@ -153,6 +153,9 @@ export class IndexerSearchException extends Error {
   }
 }
 
+/** The transport already spent its retry budget, so callers must not start another one. */
+export class IndexerRetryExhaustedException extends IndexerSearchException {}
+
 /** One file, resolved from a release that is served over plain HTTP rather than as a torrent. */
 export interface ReleaseFile {
   url: string;

@@ -11,6 +11,7 @@ import { buildPatternTokens, patternReferencesToken } from '../../common/utils/p
 import { selectPrimaryFileKeepingCurrent } from '../../common/utils/primary-file-selection.utils';
 
 import { DB } from '../../db';
+import { realignAudioTrackOrder } from '../../db/audio-track-order';
 import * as schema from '../../db/schema';
 import { books, bookFiles, libraries, libraryFolders } from '../../db/schema';
 import type { RequestUser } from '../../common/types/request-user';
@@ -303,6 +304,8 @@ export class UploadService {
           });
 
         if (!inserted) throw new Error('Failed to insert book file record');
+        // A track added by hand has no number yet, which would play it after every other track.
+        if (isAudioFormat(format)) await realignAudioTrackOrder(tx, bookId);
 
         const contentFiles = await tx
           .select({

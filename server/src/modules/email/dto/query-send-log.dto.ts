@@ -1,4 +1,4 @@
-import { IsInt, IsOptional, IsPositive, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsPositive, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class QuerySendLogDto {
@@ -26,4 +26,19 @@ export class QuerySendLogDto {
   @IsInt()
   @IsPositive()
   bookId?: number;
+
+  /** Narrows the log to one outcome. Only the web client sends it; older servers reject it. */
+  @IsOptional()
+  @IsIn(['pending', 'sent', 'failed'])
+  status?: 'pending' | 'sent' | 'failed';
+
+  /**
+   * Narrows the log to one of the caller's recipients, including rows logged before recipient ids
+   * were stored, which are matched by address. Only the web client sends it; older servers reject it.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  recipientId?: number;
 }

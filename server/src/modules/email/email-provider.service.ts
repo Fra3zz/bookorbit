@@ -6,6 +6,7 @@ import { emailProviders } from '../../db/schema';
 import { EmailEncryptionService } from './email-encryption.service';
 import { EmailTransportService } from './email-transport.service';
 import { EmailProviderRepository } from './email-provider.repository';
+import { EmailPreferencesRepository } from './email-preferences.repository';
 import { CreateEmailProviderDto } from './dto/create-email-provider.dto';
 import { UpdateEmailProviderDto } from './dto/update-email-provider.dto';
 import type { EmailProvider } from '../../db/schema';
@@ -17,6 +18,7 @@ export class EmailProviderService {
     private readonly repo: EmailProviderRepository,
     private readonly encryption: EmailEncryptionService,
     private readonly transport: EmailTransportService,
+    private readonly preferences: EmailPreferencesRepository,
   ) {}
 
   async findAll(user: RequestUser) {
@@ -95,7 +97,8 @@ export class EmailProviderService {
 
   async setDefault(id: number, user: RequestUser) {
     await this.getOwned(id, user);
-    const updated = (await this.repo.setDefault(id, user.id)).find((provider) => provider.id === id);
+    await this.preferences.setDefaults(user.id, { defaultProviderId: id });
+    const [updated] = await this.repo.findById(id);
     if (!updated) throw new NotFoundException('Provider not found');
     return this.sanitize(updated);
   }
@@ -138,12 +141,15 @@ export class EmailProviderService {
       tlsRejectUnauthorized: provider.tlsRejectUnauthorized,
     });
 
+    let result: { success: boolean; error?: string };
     try {
       await this.transport.verifyTransporter(transporter);
-      return { success: true };
+      result = { success: true };
     } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
+      result = { success: false, error: err instanceof Error ? err.message : String(err) };
     }
+    await this.repo.recordTestResult(id, result.success, result.error ? result.error.slice(0, 1000) : null);
+    return result;
   }
 
   async getProviderWithDecryptedPassword(id: number, user: RequestUser): Promise<EmailProvider & { plainPassword: string | null }> {

@@ -1,3 +1,4 @@
+import { realignAudioTrackOrder } from '../../db/audio-track-order';
 import { deleteBookFilesWithHashInvalidation, deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
@@ -126,6 +127,15 @@ export class ScannerRepository {
   async findLibraryName(libraryId: number): Promise<string | null> {
     const [row] = await this.db.select({ name: libraries.name }).from(libraries).where(eq(libraries.id, libraryId)).limit(1);
     return row?.name ?? null;
+  }
+
+  async hasLibraryAccess(userId: number, libraryId: number): Promise<boolean> {
+    const [row] = await this.db
+      .select({ userId: userLibraryAccess.userId })
+      .from(userLibraryAccess)
+      .where(and(eq(userLibraryAccess.userId, userId), eq(userLibraryAccess.libraryId, libraryId)))
+      .limit(1);
+    return row !== undefined;
   }
 
   async findLibraryAccessibleUserIds(libraryId: number): Promise<number[]> {
@@ -443,6 +453,10 @@ export class ScannerRepository {
       }
       return { bookmarks: bookmarksUpdated, progress: progressUpdated };
     });
+  }
+
+  realignAudioTrackOrder(bookId: number): Promise<number> {
+    return this.db.transaction((tx) => realignAudioTrackOrder(tx, bookId));
   }
 
   async findBookFilesByBookIds(bookIds: number[]): Promise<(typeof bookFiles.$inferSelect)[]> {
