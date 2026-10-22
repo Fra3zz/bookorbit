@@ -108,13 +108,13 @@ export const SURFACE_OPACITY_DEFAULT = 92;
 /** Top glow reach, in percent of the active style's own reach. 0 turns the glow off. */
 export const GLOW_REACH_MIN = 0;
 export const GLOW_REACH_MAX = 200;
-export const GLOW_REACH_DEFAULT = 80;
+export const GLOW_REACH_DEFAULT = 50;
 
 /** A whole visual style: surfaces, type, shell material and component accents. Independent of
  *  mode, accent, radius and background, which keep their values when the style changes. */
 export const STYLE_IDS = ["bookorbit", "nostalgia"] as const;
 export type Style = (typeof STYLE_IDS)[number];
-export const DEFAULT_STYLE: Style = "bookorbit";
+export const DEFAULT_STYLE: Style = "nostalgia";
 
 /** Neutral ground palettes. Only styles that declare a surface palette control read them. */
 export const SURFACE_PALETTE_IDS = [
@@ -149,7 +149,7 @@ export interface ThemePreferences {
   brightness: number;
   /** Optional so a client that sends it stays valid against a server that predates it. */
   surfaceOpacity?: number;
-  /** Optional for the same reason; absent means the BookOrbit style. */
+  /** Optional for the same reason; absent keeps the client's local or default style. */
   style?: Style;
   /** Optional for the same reason; absent means steel. */
   surfacePalette?: SurfacePalette;

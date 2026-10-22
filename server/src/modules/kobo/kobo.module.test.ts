@@ -18,6 +18,9 @@ import { KoboBookIdentityService } from './services/kobo-book-identity.service';
 import { KoboDeviceService } from './services/kobo-device.service';
 import { KoboDeliveryService } from './services/kobo-delivery.service';
 import { KoboDeliveryRepository } from './kobo-delivery.repository';
+import { KoboAnnotationServeRepository } from './kobo-annotation-serve.repository';
+import { KoboBookmarkLinkRepository } from './kobo-bookmark-link.repository';
+import { BookmarkModule } from '../bookmark/bookmark.module';
 import { KoboDownloadRepository } from './kobo-download.repository';
 import { KoboDownloadHashBackfillService } from './services/kobo-download-hash-backfill.service';
 import { AppSettingsModule } from '../app-settings/app-settings.module';
@@ -47,6 +50,7 @@ describe('KoboModule', () => {
     const imports = Reflect.getMetadata(MODULE_METADATA.IMPORTS, KoboModule) as unknown[];
 
     expect(imports).toContain(BookModule);
+    expect(imports).toContain(BookmarkModule);
     expect(imports).toContain(AppSettingsModule);
     expect(imports).toContain(ReadingSessionModule);
     expect(imports).toContain(AnnotationModule);
@@ -72,6 +76,8 @@ describe('KoboModule', () => {
       KoboDownloadService,
       KoboDownloadRepository,
       KoboDeliveryRepository,
+      KoboBookmarkLinkRepository,
+      KoboAnnotationServeRepository,
       KoboReadingProgressRepository,
       KoboDeliveryService,
       KoboDownloadHashBackfillService,

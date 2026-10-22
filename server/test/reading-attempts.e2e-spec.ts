@@ -74,7 +74,7 @@ describe('Reading attempts main-flow simulation (docker e2e)', { timeout: TIMEOU
   }
 
   beforeAll(async () => {
-    ctx = await createE2EContext();
+    ctx = await createE2EContext({ isolateAppData: true });
     const [admin] = await ctx.db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.username, 'scanner-e2e-admin')).limit(1);
     adminUserId = admin.id;
     const library = await seedLibrary(ctx.db, { rootPath: E2E_ROOT, mode: 'book_per_file', watch: false });
@@ -117,6 +117,79 @@ describe('Reading attempts main-flow simulation (docker e2e)', { timeout: TIMEOU
     expect(history.items[0]?.outcome).toBe('completed');
   });
 
+  it('uses a historical KOReader finish day for the book and completion statistics without overwriting later manual edits', async () => {
+    const book = await createBook();
+    const fileHash = randomUUID().replaceAll('-', '');
+    await ctx.db.update(schema.bookFiles).set({ fileHash }).where(eq(schema.bookFiles.id, book.fileId));
+    const username = `attempt-date-${randomUUID()}`;
+    const password = 'HistoricalFinish123';
+    const credentials = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/koreader/credentials',
+      headers: auth(ctx.adminToken),
+      payload: { username, password },
+    });
+    expect(credentials.statusCode).toBe(201);
+
+    const year = new Date().getUTCFullYear() - 1;
+    const finishedOn = `${year}-08-22`;
+    const startTime = Date.parse(`${finishedOn}T18:00:00.000Z`) / 1000;
+    const deviceFields = { deviceId: 'historical-finish-e2e', deviceModel: 'E2E', pluginVersion: '1.7.0' };
+    const deviceHeaders = { 'x-auth-user': username, 'x-auth-key': password };
+    const stats = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/koreader/plugin/page-stats',
+      headers: deviceHeaders,
+      payload: {
+        ...deviceFields,
+        books: [{ hash: fileHash, events: [{ page: 100, totalPages: 100, startTime, durationSeconds: 60 }] }],
+      },
+    });
+    expect(stats.statusCode).toBe(201);
+    expect(stats.json().results[0].accepted).toBe(1);
+
+    const timeline = async () => {
+      const response = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/user-statistics/completion-timeline?days=3650',
+        headers: auth(ctx.adminToken),
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json() as Array<{ year: number; month: number; count: number }>;
+    };
+    const before = await timeline();
+    const uploadState = () =>
+      ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/koreader/plugin/book-states',
+        headers: deviceHeaders,
+        payload: { ...deviceFields, books: [{ hash: fileHash, status: 'complete', statusModified: finishedOn }] },
+      });
+    expect((await uploadState()).statusCode).toBe(201);
+    expect((await uploadState()).statusCode).toBe(201);
+
+    const history = await listAttempts(book.bookId);
+    expect(history.total).toBe(1);
+    expect(history.items[0]).toMatchObject({ outcome: 'completed', endedOn: finishedOn });
+    const detail = await ctx.app.inject({ method: 'GET', url: `/api/v1/books/${book.bookId}`, headers: auth(ctx.adminToken) });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().readStatus.finishedAt).toBe(`${finishedOn}T00:00:00.000Z`);
+    const after = await timeline();
+    expect(after.find((point) => point.year === year && point.month === 8)?.count).toBe(
+      (before.find((point) => point.year === year && point.month === 8)?.count ?? 0) + 1,
+    );
+    const now = new Date();
+    expect(after.find((point) => point.year === now.getUTCFullYear() && point.month === now.getUTCMonth() + 1)?.count).toBe(
+      before.find((point) => point.year === now.getUTCFullYear() && point.month === now.getUTCMonth() + 1)?.count,
+    );
+
+    expect((await patchStatus(book.bookId, { finishedAt: `${year}-08-23` })).statusCode).toBe(200);
+    expect((await uploadState()).statusCode).toBe(201);
+    const editedHistory = await listAttempts(book.bookId);
+    expect(editedHistory.total).toBe(1);
+    expect(editedHistory.items[0]?.endedOn).toBe(`${year}-08-23`);
+  });
+
   it('3. starts a manual reread and resets progress without deleting history', async () => {
     const book = await createBook();
     await patchStatus(book.bookId, { status: 'read', startedAt: '2024-01-01', finishedAt: '2024-01-10' });
@@ -148,6 +221,55 @@ describe('Reading attempts main-flow simulation (docker e2e)', { timeout: TIMEOU
     expect(response.json()).toMatchObject({ status: 'rereading' });
     const [progress] = await ctx.db.select().from(schema.readingProgress).where(eq(schema.readingProgress.bookFileId, book.fileId));
     expect(progress.percentage).toBe(100);
+  });
+
+  // A reread on a book never finished here records the read it implies as an undated completed attempt,
+  // created after the read in progress. Taken as the latest by id, its missing dates replaced the dates
+  // of that read once finished, the next time a session landed; a past read added later did the same.
+  it('4a. keeps the latest read dates over an undated earlier read and a past read added later', async () => {
+    const book = await createBook();
+    await patchStatus(book.bookId, { status: 'reading', startedAt: '2026-08-17' });
+    const reread = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/books/${book.bookId}/reading-attempts/start-reread`,
+      headers: auth(ctx.adminToken),
+      payload: { resetProgress: false },
+    });
+    expect(reread.json()).toMatchObject({ status: 'rereading' });
+    await patchStatus(book.bookId, { status: 'read', finishedAt: '2026-10-17' });
+    const bookDates = async () => {
+      const [row] = await ctx.db
+        .select()
+        .from(schema.userBookStatus)
+        .where(and(eq(schema.userBookStatus.userId, adminUserId), eq(schema.userBookStatus.bookId, book.bookId)));
+      return { status: row?.status, startedOn: row?.startedAt?.toISOString().slice(0, 10), finishedOn: row?.finishedAt?.toISOString().slice(0, 10) };
+    };
+    const finished = { status: 'read', startedOn: '2026-08-17', finishedOn: '2026-10-17' };
+    expect(await bookDates()).toEqual(finished);
+
+    const session = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/books/files/${book.fileId}/sessions`,
+      headers: auth(ctx.adminToken),
+      payload: {
+        sessionId: `reread-dates-${book.bookId}`,
+        startedAt: '2026-10-17T18:12:00.000Z',
+        endedAt: '2026-10-17T18:19:30.000Z',
+        durationSeconds: 450,
+        endProgress: 100,
+      },
+    });
+    expect(session.statusCode).toBe(204);
+    expect(await bookDates()).toEqual(finished);
+
+    const past = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/books/${book.bookId}/reading-attempts`,
+      headers: auth(ctx.adminToken),
+      payload: { startedOn: '2019-03-01', endedOn: '2019-03-20', outcome: 'completed' },
+    });
+    expect(past.statusCode).toBe(201);
+    expect(await bookDates()).toEqual(finished);
   });
 
   it('5. adds and edits partial historical attempts without duplicating them', async () => {
@@ -273,6 +395,34 @@ describe('Reading attempts main-flow simulation (docker e2e)', { timeout: TIMEOU
     const book = await createBook();
     await patchStatus(book.bookId, { status: 'read', startedAt: '2024-01-01', finishedAt: '2024-01-10' });
     const kobo = ctx.app.get(KoboReadingStateService);
+    const device = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/kobo/devices',
+      headers: auth(ctx.adminToken),
+      payload: { name: 'Attempt simulation Kobo' },
+    });
+    expect(device.statusCode).toBe(201);
+    const deviceId = (device.json() as { id: number }).id;
+    // The device holds this copy, so the positions it reports are its reader's, not an unknown copy's.
+    await ctx.db.insert(schema.koboDeviceDeliveries).values({
+      userId: adminUserId,
+      deviceId,
+      bookId: book.bookId,
+      sourceFileId: book.fileId,
+      metadata: {
+        artifactId: 'simulated',
+        sourceRevision: 'simulated',
+        requestedVariant: null,
+        actualVariant: 'original',
+        format: 'epub',
+        sizeBytes: 1024,
+        sha256: 'simulated',
+        fileHash: 'simulated',
+        outcome: 'original',
+      },
+      options: { hyphenate: false, converterVersion: null },
+      state: 'transfer_observed',
+    });
     await kobo.upsertState(
       adminUserId,
       book.bookId,
@@ -284,7 +434,7 @@ describe('Reading attempts main-flow simulation (docker e2e)', { timeout: TIMEOU
       1,
       98,
       false,
-      1,
+      deviceId,
     );
     await kobo.upsertState(
       adminUserId,
@@ -297,7 +447,7 @@ describe('Reading attempts main-flow simulation (docker e2e)', { timeout: TIMEOU
       1,
       98,
       false,
-      1,
+      deviceId,
     );
     const history = await listAttempts(book.bookId);
     expect(history.total).toBe(2);

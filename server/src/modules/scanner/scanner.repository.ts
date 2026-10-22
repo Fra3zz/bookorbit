@@ -1,5 +1,5 @@
 import { realignAudioTrackOrder } from '../../db/audio-track-order';
-import { deleteBookFilesWithHashInvalidation, deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
+import { recordBookFileHashHistory, deleteBookFilesWithHashInvalidation, deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -110,6 +110,7 @@ export class ScannerRepository {
         allowedFormats: libraries.allowedFormats,
         formatPriority: libraries.formatPriority,
         metadataPrecedence: libraries.metadataPrecedence,
+        regexMetadata: libraries.regexMetadata,
         excludePatterns: libraries.excludePatterns,
         organizationMode: libraries.organizationMode,
         addedAtSource: libraries.addedAtSource,
@@ -259,6 +260,7 @@ export class ScannerRepository {
         mtime: bookFiles.mtime,
         fileHash: bookFiles.fileHash,
         format: bookFiles.format,
+        role: bookFiles.role,
         sortOrder: bookFiles.sortOrder,
         durationSeconds: bookFiles.durationSeconds,
         mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
@@ -290,12 +292,41 @@ export class ScannerRepository {
   }
 
   async updateBookFile(id: number, data: Partial<typeof bookFiles.$inferInsert>) {
-    const [file] = await this.db
-      .update(bookFiles)
-      .set({ ...data, updatedAt: new Date() })
-      .where(eq(bookFiles.id, id))
-      .returning();
-    return file;
+    return this.db.transaction(async (tx) => {
+      if (data.fileHash) {
+        const [previous] = await tx.select({ fileHash: bookFiles.fileHash }).from(bookFiles).where(eq(bookFiles.id, id)).for('update');
+        if (previous?.fileHash && previous.fileHash !== data.fileHash) {
+          await recordBookFileHashHistory(tx, id, previous.fileHash, 'rescan');
+          // Positions from the replaced bytes cannot be interpreted in the new DOM.
+          await tx
+            .update(schema.readingProgress)
+            .set({
+              cfi: null,
+              koreaderProgress: null,
+              pageNumber: null,
+              positionSeconds: null,
+              mediaOverlayFragment: null,
+              mediaOverlaySectionIndex: null,
+              updatedAt: sql`${schema.readingProgress.updatedAt}`,
+            })
+            .where(eq(schema.readingProgress.bookFileId, id));
+          await tx
+            .update(koreaderDeviceProgress)
+            .set({
+              progress: null,
+              chapterIndex: null,
+              updatedAt: sql`${koreaderDeviceProgress.updatedAt}`,
+            })
+            .where(eq(koreaderDeviceProgress.bookFileId, id));
+        }
+      }
+      const [file] = await tx
+        .update(bookFiles)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(bookFiles.id, id))
+        .returning();
+      return file;
+    });
   }
 
   async findBookFileByAbsolutePath(absolutePath: string, libraryId?: number) {
@@ -659,6 +690,7 @@ export class ScannerRepository {
       this.db
         .select({
           id: books.id,
+          libraryId: books.libraryId,
           status: books.status,
           coverAspectRatio: libraries.coverAspectRatio,
           formatPriority: libraries.formatPriority,

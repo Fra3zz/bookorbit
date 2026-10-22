@@ -9,6 +9,7 @@ import {
   primaryKey,
   real,
   serial,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -308,6 +309,8 @@ export const readingSessions = pgTable(
     // Nullable: CBX with no percentage tracking may omit these.
     progressDelta: real('progress_delta'),
     endProgress: real('end_progress'),
+    // Counter-derived sync estimates only: the previous counter push, where the interval the estimate stands for begins.
+    syncIntervalStartedAt: timestamp('sync_interval_started_at', { withTimezone: true }),
   },
   (t) => [
     uniqueIndex('rs_user_session_id_uidx').on(t.userId, t.sessionId),
@@ -424,7 +427,7 @@ export const audiobookProgress = pgTable(
 export type AudiobookProgress = typeof audiobookProgress.$inferSelect;
 export type NewAudiobookProgress = typeof audiobookProgress.$inferInsert;
 
-export type BookmarkOrigin = 'web' | 'koreader';
+export type BookmarkOrigin = 'web' | 'koreader' | 'kobo';
 
 export const userBookReadAloudSyncSettings = pgTable(
   'user_book_read_aloud_sync_settings',
@@ -462,6 +465,7 @@ export const bookmarks = pgTable(
     bookId: integer('book_id')
       .notNull()
       .references(() => books.id, { onDelete: 'cascade' }),
+    bookFileId: integer('book_file_id').references(() => bookFiles.id, { onDelete: 'set null' }),
     // EPUB: CFI string pinpoints exact location. Null for audio bookmarks.
     cfi: varchar('cfi', { length: 2000 }),
     title: varchar('title', { length: 500 }).notNull(),
@@ -496,7 +500,7 @@ export const bookmarks = pgTable(
     uniqueIndex('bookmarks_user_book_pos_uidx')
       .on(t.userId, t.bookId, t.positionSeconds)
       .where(sql`${t.positionSeconds} is not null and ${t.cfi} is null and ${t.deletedAt} is null`),
-    check('bookmarks_origin_chk', sql`${t.origin} in ('web', 'koreader')`),
+    check('bookmarks_origin_chk', sql`${t.origin} in ('web', 'koreader', 'kobo')`),
   ],
 );
 
@@ -527,6 +531,9 @@ export const annotations = pgTable(
     // deviceCreatedAt doubles as the KOReader-side identity datetime for synced annotations.
     deviceCreatedAt: varchar('device_created_at', { length: 19 }),
     deviceUpdatedAt: varchar('device_updated_at', { length: 19 }),
+    // Real time of the last note, color, style or text change from any client. Device edits are
+    // judged against it, since the device strings above mix Kobo UTC with KOReader local time.
+    contentUpdatedAt: timestamp('content_updated_at', { withTimezone: true }),
     sourceCreatedAt: timestamp('source_created_at', { withTimezone: true }),
     // Server-only reader metadata. Deliberately outside `version`, which drives device push-down:
     // no device carries a star, so starring must not re-send the highlight to every device.
@@ -600,6 +607,12 @@ export const annotationPositions = pgTable(
 export type AnnotationPosition = typeof annotationPositions.$inferSelect;
 export type NewAnnotationPosition = typeof annotationPositions.$inferInsert;
 
+export interface AnnotationDeviceContent {
+  note: string | null;
+  color: string | null;
+  style: string | null;
+}
+
 export const annotationSyncState = pgTable(
   'annotation_sync_state',
   {
@@ -618,6 +631,12 @@ export const annotationSyncState = pgTable(
     // 0 = row exists from device upload but nothing pushed yet; otherwise the canonical
     // version this device has acknowledged. Only the exchange ack advances it.
     lastAppliedVersion: integer('last_applied_version').notNull().default(0),
+    // What this device last held, in its own terms (palette color, drawer), so an upload can
+    // tell the fields it changed from the ones it merely echoes. Null until the first upload or ack.
+    deviceContent: jsonb('device_content').$type<AnnotationDeviceContent>(),
+    // Kobo only: which clock the served `clientLastModifiedUtc` came from when the device last acked. Before 1 it was a
+    // device wall time labelled UTC, which the firmware could rank below its own edit and silently ignore.
+    servedClock: smallint('served_clock').notNull().default(0),
     deleteAckedAt: timestamp('delete_acked_at', { withTimezone: true }),
     firstSyncedAt: timestamp('first_synced_at', { withTimezone: true }).defaultNow().notNull(),
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true })

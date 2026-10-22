@@ -13,7 +13,7 @@ const props = withDefaults(
     /** Recent sessions listed under the summary. 0 hides the list entirely. */
     sessionRows?: number
   }>(),
-  { sessions: () => [], loading: false, sessionRows: 4 },
+  { sessions: () => [], loading: false, sessionRows: 3 },
 )
 
 const { t } = useI18n()
@@ -104,7 +104,7 @@ function dayLabel(day: string, minutes: number): string {
     </p>
 
     <template v-else>
-      <div class="mt-3 flex items-end gap-6">
+      <div class="mt-3 flex flex-wrap items-end gap-x-6 gap-y-2">
         <dl class="flex shrink-0 gap-6">
           <div v-for="stat in summaryStats" :key="stat.key">
             <dt class="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">{{ stat.label }}</dt>

@@ -32,7 +32,7 @@ import { readingDateToDateKey } from '@/features/book/lib/reading-date'
 import { getProviderColor, PROVIDER_SHORT_LABELS } from '@/lib/provider-colors'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
 import { useBookCoverAspectRatio } from '@/features/book/composables/useBookCoverAspectRatio'
-import { FORMAT_TO_GROUP, getPrimaryBookFile, READER_OPENABLE_FORMATS } from '@bookorbit/types'
+import { FORMAT_TO_GROUP, getPrimaryBookFile, READER_OPENABLE_FORMATS, isComicFormat } from '@bookorbit/types'
 import type { BookDetail, BookKoboState, CustomMetadataBookValue, ReadAloudProgressSync, ReadStatus, UserBookStatus } from '@bookorbit/types'
 import { STATUS_OPTIONS, STATUS_ICONS, STATUS_COLORS, useBookStatus } from '@/features/book/composables/useBookStatus'
 import BookDownloadButton from '@/features/book/components/BookDownloadButton.vue'
@@ -45,6 +45,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { api } from '@/lib/api'
 import { useAuth } from '@/features/auth/composables/useAuth'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { useDeleteBook } from '@/features/book/composables/useDeleteBook'
 import { useMetadataLocks } from '@/features/book/composables/useMetadataLocks'
 import { usePersonalNote, PERSONAL_NOTE_MAX_LENGTH } from '@/features/book/composables/usePersonalNote'
@@ -59,6 +60,7 @@ import MetadataScoreBreakdown from '@/features/metadata-score/components/Metadat
 import { useMetadataScoreWeights } from '@/features/metadata-score/composables/useMetadataScoreWeights'
 import { useSafeHtml } from '@/features/book/composables/useSafeHtml'
 import { useKoreaderBookProgress } from '@/features/koreader/composables/useKoreaderBookProgress'
+import KoreaderResetHoldNotice from '@/features/koreader/components/KoreaderResetHoldNotice.vue'
 import { RATING_STARS, getRatingStarClass } from '@/features/book/lib/rating-stars'
 import { formatCommunityRatingValue } from '@/features/book/lib/community-rating'
 import BookCoverSurface from '@/features/book/components/BookCoverSurface.vue'
@@ -67,6 +69,7 @@ import HardcoverBookSyncGridItem from '@/features/hardcover/components/Hardcover
 import StorygraphBookSyncGridItem from '@/features/storygraph/components/StorygraphBookSyncGridItem.vue'
 import BookEditionsCard, { type EditionProgress } from '@/features/book/components/detail/details/BookEditionsCard.vue'
 import BookReadingActivityCard from '@/features/book/components/detail/details/BookReadingActivityCard.vue'
+import ReadAloudSyncMeter from '@/features/book/components/detail/details/ReadAloudSyncMeter.vue'
 import BookMissingFormatRequest from '@/features/book-requests/components/BookMissingFormatRequest.vue'
 import { useBookReadingLog } from '@/features/book/composables/useBookReadingLog'
 import { useProviderLinkSettings } from '@/features/book/composables/useProviderLinkSettings'
@@ -254,6 +257,7 @@ onBeforeUnmount(() => {
 })
 
 const { hasPermission } = usePermissions()
+const { hasLibraryPermission } = useLibraryPermissions()
 const { load: loadLocks, isLocked } = useMetadataLocks()
 watch(
   () => props.book,
@@ -264,7 +268,8 @@ watch(
 const isRatingLocked = computed(() => isLocked('rating'))
 const canViewKobo = computed(() => hasPermission('kobo_sync'))
 const canViewKoreader = computed(() => hasPermission('koreader_sync'))
-const canEditMetadata = computed(() => hasPermission('library_edit_metadata'))
+const canEditMetadata = computed(() => hasLibraryPermission('library_edit_metadata', props.book?.libraryId, 'editor'))
+const canManageReadingState = computed(() => hasPermission('library_edit_metadata'))
 const resetReadingStateBookId = computed(() => props.book.id)
 const {
   open: resetReadingStateDialogOpen,
@@ -277,6 +282,7 @@ const {
 
 const coverSeed = computed(() => props.book.title ?? props.book.folderPath.split('/').pop() ?? String(props.book.id))
 const coverPlaceholderTitle = computed(() => props.book.title ?? props.book.folderPath.split('/').pop() ?? null)
+const coverAuthors = computed(() => props.book.authors.map((a) => a.name))
 const hasCover = computed(() => props.book.coverSource !== null)
 const { coverUrl } = useCoverVersions()
 const coverSrc = computed(() => coverUrl(props.book.id, 'cover', props.book.coverVersion))
@@ -360,7 +366,7 @@ const isFaceAudio = computed(() => {
   if (!props.book.covers.ebook && !props.book.covers.audio) return isPrimaryAudio.value
   return faceMedium(props.book, coverAspectRatio.value) === 'audio'
 })
-const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
+const isPrimaryComic = computed(() => primaryFile.value?.format != null && isComicFormat(primaryFile.value.format))
 const formatEntries = computed(() => bookFormatEntries(props.book.files, props.book.formatPriority))
 const isMultiTrackAudio = computed(() => formatEntries.value.some((entry) => entry.audio && entry.files.length > 1))
 // A multi-file audiobook opens from its first track, so it is one entry in the menu.
@@ -373,14 +379,13 @@ const hasMultipleFiles = computed(() => openableFiles.value.length > 1)
 const readAloudSync = ref<ReadAloudProgressSync>(props.book.readAloudSync)
 const readAloudSyncSaving = ref(false)
 const readAloudSyncError = ref<string | null>(null)
-const showReadAloudSync = computed(() => readAlongFile.value != null || hasAudioFile.value)
+const hasOtherEpubCopy = computed(() => props.book.files.filter((file) => file.format?.toLowerCase() === 'epub').length > 1)
+// Sync bridges a read-along EPUB to an audiobook or to other EPUB copies; a book with only one side has nothing to sync.
+const showReadAloudSync = computed(() => readAlongFile.value != null && (hasAudioFile.value || hasOtherEpubCopy.value))
 // Another EPUB beside the read-along file keeps its position in sync through the read-along's
 // narration even when no audiobook can be matched, so only the audiobook half is unavailable.
 const syncsEpubCopiesOnly = computed(
-  () =>
-    readAloudSync.value.state === 'unavailable' &&
-    readAloudSync.value.unavailableReason !== 'no_media_overlay_epub' &&
-    props.book.files.filter((file) => file.format?.toLowerCase() === 'epub').length > 1,
+  () => readAloudSync.value.state === 'unavailable' && readAloudSync.value.unavailableReason !== 'no_media_overlay_epub' && hasOtherEpubCopy.value,
 )
 const readAloudSyncStatus = computed(() =>
   syncsEpubCopiesOnly.value
@@ -397,6 +402,21 @@ const readAloudSyncDescription = computed(() => {
 const readAloudSyncAudiobookNote = computed(() =>
   syncsEpubCopiesOnly.value && readAloudSync.value.unavailableReason !== 'no_audio_files' ? readAloudSyncUnavailableReason() : null,
 )
+const readAloudSyncChipLabel = computed(() => {
+  if (!syncsEpubCopiesOnly.value) return t(`book.detail.details.readAloudSync.chip.${readAloudSync.value.state}`)
+  return readAloudSyncAudiobookNote.value ? t('book.detail.details.readAloudSync.chip.partial') : t('book.detail.details.readAloudSync.chip.enabled')
+})
+const readAloudSyncAligned = computed(
+  () => readAloudSync.value.state === 'enabled' || (syncsEpubCopiesOnly.value && readAloudSyncAudiobookNote.value == null),
+)
+const readAloudSyncChipAria = computed(() => t('book.detail.details.readAloudSync.chipAria', { status: readAloudSyncChipLabel.value }))
+const readAloudSyncNeedsAttention = computed(
+  () => (readAloudSync.value.state === 'unavailable' && !syncsEpubCopiesOnly.value) || readAloudSyncAudiobookNote.value != null,
+)
+const readAloudSyncToggleLabel = computed(() => {
+  if (readAloudSyncSaving.value) return t('book.detail.details.readAloudSync.saving')
+  return readAloudSync.value.mode === 'disabled' ? t('book.detail.details.readAloudSync.enable') : t('book.detail.details.readAloudSync.disable')
+})
 
 function readAloudSyncUnavailableReason(): string {
   const reason = readAloudSync.value.unavailableReason ?? 'missing_duration'
@@ -880,28 +900,9 @@ function formatKoboDeviceNames(snapshots: BookKoboState['snapshots']): string {
 }
 
 const resetHeldDevices = computed(() => (canViewKoreader.value ? (koreaderBookProgress.value?.heldByReset ?? []) : []))
-const releasingDeviceIds = ref<string[]>([])
-const failedReleaseDeviceIds = ref<string[]>([])
 
-function isReleasingHold(deviceId: string): boolean {
-  return releasingDeviceIds.value.includes(deviceId)
-}
-
-function hasReleaseFailed(deviceId: string): boolean {
-  return failedReleaseDeviceIds.value.includes(deviceId)
-}
-
-async function handleReleaseResetHold(deviceId: string) {
-  if (isReleasingHold(deviceId)) return
-  releasingDeviceIds.value = [...releasingDeviceIds.value, deviceId]
-  failedReleaseDeviceIds.value = failedReleaseDeviceIds.value.filter((id) => id !== deviceId)
-  try {
-    const released = await releaseKoreaderResetHold(props.book.id, deviceId)
-    // A button that re-enables with the hold still showing reads as nothing having happened.
-    if (!released) failedReleaseDeviceIds.value = [...failedReleaseDeviceIds.value, deviceId]
-  } finally {
-    releasingDeviceIds.value = releasingDeviceIds.value.filter((id) => id !== deviceId)
-  }
+function releaseResetHold(deviceId: string): Promise<boolean> {
+  return releaseKoreaderResetHold(props.book.id, deviceId)
 }
 
 const koboAnomaly = computed(() => {
@@ -964,13 +965,6 @@ function formatAddedDateTime(iso: string): string {
     minute: '2-digit',
     timeZone: userTimeZone.value,
   })
-}
-
-function formatPercent(value: number): string {
-  const clamped = Math.max(0, Math.min(100, value))
-  if (clamped > 0 && clamped < 1) return '<1%'
-  if (clamped > 99 && clamped < 100) return '>99%'
-  return `${Math.round(clamped)}%`
 }
 
 function formatDate(iso: string): string {
@@ -1055,6 +1049,7 @@ function handleCoverLightboxOpenChange(open: boolean) {
 }
 
 function openEditCover() {
+  if (!canEditMetadata.value) return
   router.push({ name: 'book-detail', params: { bookId: props.book.id }, query: { tab: 'edit' } })
 }
 
@@ -1271,7 +1266,7 @@ watch(
                 :aria-label="t('book.detail.details.viewCover')"
                 @click="handleCoverClick"
               />
-              <Tooltip>
+              <Tooltip v-if="canEditMetadata">
                 <TooltipTrigger as-child>
                   <button
                     class="absolute top-1.5 right-1.5 z-10 p-1 rounded-xs bg-black/50 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
@@ -1296,6 +1291,11 @@ watch(
                 backdrop-class="blur-lg brightness-50"
                 :spine="!isFaceAudio"
                 :is-comic="isPrimaryComic"
+                :authors="coverAuthors"
+                :subtitle="book.subtitle"
+                :series-name="book.seriesName"
+                :series-index="book.seriesIndex"
+                :genres="book.genres"
                 @load="handleCoverLoad"
                 @error="handleCoverError"
               />
@@ -1453,7 +1453,11 @@ watch(
             >
               <Send class="size-3.5" />
             </button>
-            <Popover v-if="canEditMetadata || hasPermission('library_delete_books')" :open="moreMenuOpen" @update:open="(v) => (moreMenuOpen = v)">
+            <Popover
+              v-if="canManageReadingState || canEditMetadata || hasPermission('library_delete_books')"
+              :open="moreMenuOpen"
+              @update:open="(v) => (moreMenuOpen = v)"
+            >
               <PopoverTrigger as-child>
                 <button
                   class="flex flex-1 items-center justify-center h-9 rounded-md border border-border bg-background text-foreground hover:bg-muted transition-colors"
@@ -1463,7 +1467,7 @@ watch(
               </PopoverTrigger>
               <PopoverContent class="w-44 p-1" align="end">
                 <button
-                  v-if="canEditMetadata"
+                  v-if="canManageReadingState"
                   class="flex w-full items-center gap-2 px-2 py-1.5 rounded-xs text-sm text-foreground hover:bg-muted transition-colors"
                   @click="handleOpenResetReadingState"
                 >
@@ -1471,7 +1475,7 @@ watch(
                   Reset reading state
                 </button>
                 <button
-                  v-if="hasPermission('library_edit_metadata')"
+                  v-if="canEditMetadata"
                   class="flex w-full items-center gap-2 px-2 py-1.5 rounded-xs text-sm hover:bg-muted transition-colors"
                   @click="handleMoveFromMenu"
                 >
@@ -1491,24 +1495,7 @@ watch(
           </div>
         </div>
 
-        <div v-for="held in resetHeldDevices" :key="held.deviceId" class="mt-2 flex items-start gap-1.5">
-          <TriangleAlert class="size-3 text-amber-500 shrink-0 mt-0.5" aria-hidden="true" />
-          <div class="min-w-0">
-            <p class="text-[11px] text-amber-500">
-              {{ t('book.detail.details.resetHoldNotice', { device: held.device, percent: formatPercent(held.percentage) }) }}
-            </p>
-            <button
-              class="mt-0.5 text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="isReleasingHold(held.deviceId)"
-              @click="handleReleaseResetHold(held.deviceId)"
-            >
-              {{ isReleasingHold(held.deviceId) ? t('book.detail.details.resetHoldReleasing') : t('book.detail.details.resetHoldRelease') }}
-            </button>
-            <p v-if="hasReleaseFailed(held.deviceId)" role="alert" class="text-[11px] text-destructive">
-              {{ t('book.detail.details.resetHoldReleaseFailed') }}
-            </p>
-          </div>
-        </div>
+        <KoreaderResetHoldNotice v-if="resetHeldDevices.length > 0" class="mt-2" :held="resetHeldDevices" :release="releaseResetHold" />
         <Tooltip v-if="koboAnomaly">
           <TooltipTrigger as-child>
             <div class="mt-2 flex items-center gap-1.5 cursor-help" tabindex="0">
@@ -1574,7 +1561,7 @@ watch(
           </template>
         </div>
 
-        <div class="mt-3 flex items-center gap-1" @mouseleave="hoverRating = null">
+        <div class="mt-3 flex flex-wrap items-center gap-x-1 gap-y-1.5" @mouseleave="hoverRating = null">
           <div class="flex items-center gap-1">
             <template v-if="canEditMetadata">
               <Tooltip v-for="star in ratingStars" :key="star">
@@ -1655,6 +1642,52 @@ watch(
           :primary="entry.primary"
           class="rounded-xs px-2 py-0.5 text-[10px] tracking-wider"
         />
+        <Popover v-if="showReadAloudSync">
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              data-test="read-aloud-sync-trigger"
+              class="inline-flex h-6 items-center overflow-hidden rounded-md border border-border text-[11px] font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :aria-label="readAloudSyncChipAria"
+              :title="readAloudSyncChipAria"
+            >
+              <span class="flex size-6 items-center justify-center">
+                <ReadAloudSyncMeter :aligned="readAloudSyncAligned" :muted="readAloudSync.state === 'disabled'" />
+              </span>
+              <span class="flex h-full items-center gap-1.5 border-l border-border/60 bg-background/50 pl-1.5 pr-1">
+                {{ readAloudSyncChipLabel }}
+                <span v-if="readAloudSyncNeedsAttention" data-test="read-aloud-sync-attention" class="size-1.5 shrink-0 rounded-full bg-warning" />
+                <ChevronDown class="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              </span>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="start" class="w-80 max-w-[calc(100vw-2rem)] p-3">
+            <div data-test="read-aloud-sync">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <p class="text-xs font-semibold text-foreground">{{ t('book.detail.details.readAloudSync.title') }}</p>
+                <span class="text-[11px] text-muted-foreground">{{ readAloudSyncStatus }}</span>
+              </div>
+              <p class="mt-1 text-xs text-muted-foreground">{{ readAloudSyncDescription }}</p>
+              <p v-if="readAloudSyncAudiobookNote" data-test="read-aloud-sync-audiobook-note" class="mt-1 text-xs text-muted-foreground">
+                {{ readAloudSyncAudiobookNote }}
+              </p>
+              <p v-if="readAloudSyncError" class="mt-1 text-xs text-destructive" role="status" aria-live="polite">
+                {{ readAloudSyncError }}
+              </p>
+              <div class="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  data-test="read-aloud-sync-toggle"
+                  class="rounded-md border border-input px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  :disabled="readAloudSyncSaving"
+                  @click="handleToggleReadAloudSync"
+                >
+                  {{ readAloudSyncToggleLabel }}
+                </button>
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
         <div v-if="providerLinks.length || unlinkedCommunityBadges.length" class="flex items-center flex-wrap gap-2 w-full sm:w-auto sm:shrink-0">
           <div class="hidden sm:block w-px h-3.5 bg-border" />
           <a
@@ -1712,40 +1745,6 @@ watch(
         </div>
       </div>
 
-      <section v-if="showReadAloudSync" data-test="read-aloud-sync" class="rounded-lg border border-border bg-card px-3 py-2.5">
-        <div class="flex items-start gap-3">
-          <Headphones class="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <div class="min-w-0 flex-1">
-            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <p class="text-xs font-semibold text-foreground">{{ t('book.detail.details.readAloudSync.title') }}</p>
-              <span class="text-[11px] text-muted-foreground">{{ readAloudSyncStatus }}</span>
-            </div>
-            <p class="mt-0.5 text-xs text-muted-foreground">{{ readAloudSyncDescription }}</p>
-            <p v-if="readAloudSyncAudiobookNote" data-test="read-aloud-sync-audiobook-note" class="mt-0.5 text-xs text-muted-foreground">
-              {{ readAloudSyncAudiobookNote }}
-            </p>
-            <p v-if="readAloudSyncError" class="mt-1 text-xs text-destructive" role="status" aria-live="polite">
-              {{ readAloudSyncError }}
-            </p>
-          </div>
-          <button
-            type="button"
-            data-test="read-aloud-sync-toggle"
-            class="shrink-0 rounded-md border border-input px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="readAloudSyncSaving"
-            @click="handleToggleReadAloudSync"
-          >
-            {{
-              readAloudSyncSaving
-                ? t('book.detail.details.readAloudSync.saving')
-                : readAloudSync.mode === 'disabled'
-                  ? t('book.detail.details.readAloudSync.enable')
-                  : t('book.detail.details.readAloudSync.disable')
-            }}
-          </button>
-        </div>
-      </section>
-
       <!-- Genres + Tags -->
       <div v-if="book.genres.length || book.tags.length" class="space-y-1">
         <div v-if="book.genres.length" class="relative">
@@ -1785,7 +1784,7 @@ watch(
           <div
             ref="genreMeasureContainer"
             aria-hidden="true"
-            class="pointer-events-none invisible absolute left-0 top-0 -z-10 flex w-full items-center gap-1.5 whitespace-nowrap"
+            class="pointer-events-none invisible absolute left-0 top-0 -z-10 flex w-full items-center gap-1.5 overflow-hidden whitespace-nowrap"
           >
             <span
               v-for="(genre, index) in book.genres"

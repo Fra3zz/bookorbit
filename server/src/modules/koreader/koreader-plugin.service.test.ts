@@ -48,7 +48,7 @@ describe('KoreaderPluginService', () => {
   let userBookStatusService: {
     findOne: ReturnType<typeof vi.fn>;
     findByBookIds: ReturnType<typeof vi.fn>;
-    setManual: ReturnType<typeof vi.fn>;
+    updateManual: ReturnType<typeof vi.fn>;
   };
   let userBookNoteService: {
     findByBookIds: ReturnType<typeof vi.fn>;
@@ -86,7 +86,7 @@ describe('KoreaderPluginService', () => {
     userBookStatusService = {
       findOne: vi.fn().mockResolvedValue(null),
       findByBookIds: vi.fn().mockResolvedValue(new Map()),
-      setManual: vi.fn().mockResolvedValue(undefined),
+      updateManual: vi.fn().mockImplementation((_userId, _bookId, patch) => ({ ...patch, source: 'manual', updatedAt: new Date().toISOString() })),
     };
     userBookNoteService = {
       findByBookIds: vi.fn().mockResolvedValue(new Map()),
@@ -400,7 +400,13 @@ describe('KoreaderPluginService', () => {
     it('applies a status when no server status exists', async () => {
       const result = await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'complete', statusModified: '2026-06-01' }]));
 
-      expect(userBookStatusService.setManual).toHaveBeenCalledWith(7, 20, 'read', 'UTC');
+      expect(userBookStatusService.updateManual).toHaveBeenCalledWith(
+        7,
+        20,
+        { status: 'read', finishedAt: new Date('2026-06-01T00:00:00.000Z') },
+        { endedOn: '2026-06-01' },
+        'UTC',
+      );
       expect(result.results[0]).toMatchObject({ hash: HASH_A, statusApplied: true, ratingApplied: false, reviewApplied: false });
     });
 
@@ -410,7 +416,30 @@ describe('KoreaderPluginService', () => {
         statesDto([{ hash: HASH_A, status: 'complete', statusModified: '2026-06-01' }]),
       );
 
-      expect(userBookStatusService.setManual).toHaveBeenCalledWith(7, 20, 'read', 'America/Chicago');
+      expect(userBookStatusService.updateManual).toHaveBeenCalledWith(
+        7,
+        20,
+        { status: 'read', finishedAt: new Date('2026-06-01T00:00:00.000Z') },
+        { endedOn: '2026-06-01' },
+        'America/Chicago',
+      );
+    });
+
+    it.each([undefined, '2026-02-30', '0000-01-01'])('keeps completion uploads compatible without a usable date: %s', async (statusModified) => {
+      const result = await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'complete', statusModified }]));
+
+      expect(userBookStatusService.updateManual).toHaveBeenCalledExactlyOnceWith(7, 20, { status: 'read' }, undefined, 'UTC');
+      expect(result.results[0]!.statusApplied).toBe(true);
+    });
+
+    it('does not introduce a date-order failure when a device finish precedes the existing start', async () => {
+      userBookStatusService.findByBookIds.mockResolvedValue(
+        new Map([[20, { status: 'reading', source: 'manual', startedAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-06-01T08:00:00.000Z' }]]),
+      );
+
+      await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'complete', statusModified: '2026-06-02' }]));
+
+      expect(userBookStatusService.updateManual).toHaveBeenCalledExactlyOnceWith(7, 20, { status: 'read' }, undefined, 'UTC');
     });
 
     it('treats an identical status as applied without writing', async () => {
@@ -418,7 +447,7 @@ describe('KoreaderPluginService', () => {
 
       const result = await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'complete', statusModified: '2026-01-01' }]));
 
-      expect(userBookStatusService.setManual).not.toHaveBeenCalled();
+      expect(userBookStatusService.updateManual).not.toHaveBeenCalled();
       expect(result.results[0]!.statusApplied).toBe(true);
     });
 
@@ -427,7 +456,7 @@ describe('KoreaderPluginService', () => {
 
       await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'abandoned', statusModified: '2026-06-06' }]));
 
-      expect(userBookStatusService.setManual).toHaveBeenCalledWith(7, 20, 'abandoned', 'UTC');
+      expect(userBookStatusService.updateManual).toHaveBeenCalledWith(7, 20, { status: 'abandoned' }, undefined, 'UTC');
     });
 
     it('keeps the server status on a same-day tie or older device date', async () => {
@@ -436,9 +465,28 @@ describe('KoreaderPluginService', () => {
       const tie = await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'complete', statusModified: '2026-06-05' }]));
       const older = await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'complete', statusModified: '2026-06-04' }]));
 
-      expect(userBookStatusService.setManual).not.toHaveBeenCalled();
+      expect(userBookStatusService.updateManual).not.toHaveBeenCalled();
       expect(tie.results[0]!.statusApplied).toBe(false);
       expect(older.results[0]!.statusApplied).toBe(false);
+    });
+
+    it.each([
+      ['unread', 'reading'],
+      ['rereading', 'reading'],
+      ['read', 'complete'],
+      ['skimmed', 'complete'],
+      ['on_hold', 'abandoned'],
+    ])('projects canonical %s into device %s without a write', async (canonical, device) => {
+      serverStatus(canonical, '2026-06-05T08:00:00.000Z');
+      const result = await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A }]));
+      expect(result.results[0]).toMatchObject({ status: device, statusSet: true, statusUpdatedAt: '2026-06-05T08:00:00.000Z' });
+      expect(userBookStatusService.updateManual).not.toHaveBeenCalled();
+    });
+
+    it('returns projected rereading after an accepted device reading write', async () => {
+      userBookStatusService.updateManual.mockResolvedValue({ status: 'rereading', updatedAt: '2026-06-06T08:00:00.000Z' });
+      const result = await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'reading' }]));
+      expect(result.results[0]).toMatchObject({ status: 'reading', statusSet: true });
     });
 
     it('applies a rating when none exists and emits the rating event', async () => {
@@ -466,6 +514,18 @@ describe('KoreaderPluginService', () => {
       await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, rating: 5, statusModified: '2026-06-02' }]));
 
       expect(pluginRepo.upsertRatings).toHaveBeenCalledWith(7, [{ bookId: 20, rating: 5 }], expect.any(Date));
+    });
+
+    it('does not treat transformed optional undefined fields as clears during a newer status write', async () => {
+      serverRating(4, new Date('2026-06-01T08:00:00.000Z'));
+      serverNote('Keep this review', '2026-06-01T08:00:00.000Z');
+      const result = await service.uploadBookStates(
+        makeUser(),
+        statesDto([{ hash: HASH_A, status: 'reading', statusModified: '2026-06-02', rating: undefined, reviewNote: undefined }]),
+      );
+      expect(result.results[0]).toMatchObject({ rating: 4, reviewNote: 'Keep this review' });
+      expect(pluginRepo.upsertRatings).not.toHaveBeenCalled();
+      expect(userBookNoteService.setNotes).not.toHaveBeenCalled();
     });
 
     it('clears a rating when the device clear is newer and reports the written timestamp', async () => {
@@ -583,8 +643,8 @@ describe('KoreaderPluginService', () => {
       expect(achievementEvents.emit).toHaveBeenCalledTimes(1);
     });
 
-    it('re-reads a status only when a later entry resolves to a book written in this batch', async () => {
-      userBookStatusService.findOne.mockResolvedValue({ status: 'read', source: 'manual', updatedAt: '2026-06-06T08:00:00.000Z' });
+    it('reuses the canonical status returned by a write for later entries in the batch', async () => {
+      userBookStatusService.updateManual.mockResolvedValue({ status: 'read', source: 'manual', updatedAt: '2026-06-06T08:00:00.000Z' });
 
       const result = await service.uploadBookStates(
         makeUser(),
@@ -594,8 +654,8 @@ describe('KoreaderPluginService', () => {
         ]),
       );
 
-      expect(userBookStatusService.setManual).toHaveBeenCalledTimes(1);
-      expect(userBookStatusService.findOne).toHaveBeenCalledTimes(1);
+      expect(userBookStatusService.updateManual).toHaveBeenCalledTimes(1);
+      expect(userBookStatusService.findOne).not.toHaveBeenCalled();
       expect(result.results.map((entry) => entry.statusApplied)).toEqual([true, true]);
     });
 

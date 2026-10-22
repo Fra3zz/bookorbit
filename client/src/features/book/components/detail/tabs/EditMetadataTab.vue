@@ -16,21 +16,22 @@ import {
   X,
 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import type {
-  BookCommunityRating,
-  BookDetail,
-  BookMetadataLockField,
-  CoverMedium,
-  CustomMetadataPrimitiveValue,
-  MetadataProviderInfo,
-  WriteResult,
+import type { BookCommunityRating, BookDetail, BookMetadataLockField, CoverMedium, MetadataProviderInfo, WriteResult } from '@bookorbit/types'
+import {
+  BOOK_FILE_WRITE_FIELD_LABELS,
+  FORMAT_TO_GROUP,
+  IDENTIFIER_INPUT_KIND_BY_FIELD,
+  getPrimaryBookFile,
+  isValidSeriesIndex,
+  parseSeriesIndex,
+  isComicFormat,
 } from '@bookorbit/types'
-import { BOOK_FILE_WRITE_FIELD_LABELS, FORMAT_TO_GROUP, getPrimaryBookFile, isValidSeriesIndex, parseSeriesIndex } from '@bookorbit/types'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { api } from '@/lib/api'
 import { metadataScoreColor } from '@/lib/metadata-score-color'
 import ChipInput from '@/components/ui/ChipInput.vue'
+import IdentifierInput from '@/components/ui/IdentifierInput.vue'
 import CoverEditorPanel from './CoverEditorPanel.vue'
 import MetadataSearchDrawer from './MetadataSearchDrawer.vue'
 import MetadataFieldLabel from './MetadataFieldLabel.vue'
@@ -61,6 +62,7 @@ import { useMetadataReminders } from '@/features/metadata-reminders/composables/
 import { missingMetadataFields } from '@/features/metadata-reminders/lib/missing-metadata'
 import MetadataReminderSheet from '@/features/metadata-reminders/components/MetadataReminderSheet.vue'
 import MetadataSourceCard from './MetadataSourceCard.vue'
+import CustomMetadataValueInput from '../../CustomMetadataValueInput.vue'
 
 const AUTO_FILL_EMPTY_TOAST_DURATION_MS = 10_000
 
@@ -119,7 +121,7 @@ const COMIC_FIELD_MAP = {
 
 const primaryFile = computed(() => getPrimaryBookFile(props.book.files))
 const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
-const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
+const isPrimaryComic = computed(() => primaryFile.value?.format != null && isComicFormat(primaryFile.value.format))
 const fileWriteStatus = computed(() => props.book.fileWriteStatus ?? null)
 const fileWriteWritableFormats = computed(() => fileWriteStatus.value?.writableFormats ?? [])
 const fileWriteFieldLabels = computed(() => (fileWriteStatus.value?.writableFields ?? []).map((field) => BOOK_FILE_WRITE_FIELD_LABELS[field]))
@@ -224,38 +226,6 @@ function setPublishedDateField(e: Event) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     form.publishedYear = Number(value.slice(0, 4))
   }
-}
-
-function isTextLikeCustomField(type: string): boolean {
-  return type === 'text' || type === 'url'
-}
-
-function setCustomMetadataValue(fieldId: number, value: CustomMetadataPrimitiveValue) {
-  const field = form.customMetadata.find((item) => item.fieldId === fieldId)
-  if (field) field.value = value
-}
-
-function setCustomNumberField(fieldId: number, e: Event) {
-  const val = (e.target as HTMLInputElement).value
-  if (val === '') {
-    setCustomMetadataValue(fieldId, null)
-    return
-  }
-  const n = Number(val)
-  setCustomMetadataValue(fieldId, Number.isFinite(n) ? n : null)
-}
-
-function setCustomTextField(fieldId: number, e: Event) {
-  setCustomMetadataValue(fieldId, (e.target as HTMLInputElement).value)
-}
-
-function setCustomDateField(fieldId: number, e: Event) {
-  const val = (e.target as HTMLInputElement).value
-  setCustomMetadataValue(fieldId, val || null)
-}
-
-function setCustomBooleanField(fieldId: number, e: Event) {
-  setCustomMetadataValue(fieldId, (e.target as HTMLInputElement).checked)
 }
 
 let watchedBookId: number | null = null
@@ -1190,39 +1160,13 @@ function handleCoverChanged(medium: CoverMedium | null) {
               </MetadataFieldLabel>
 
               <div v-if="form.customMetadata.length > 0" class="grid grid-cols-1 gap-2.5 border-t border-border pt-2.5 @sm/edit:grid-cols-2">
-                <label v-for="field in form.customMetadata" :key="field.fieldId" class="space-y-1">
-                  <span class="text-[10px] font-bold tracking-[0.1em] text-muted-foreground uppercase">{{ field.label }}</span>
-                  <input
-                    v-if="isTextLikeCustomField(field.type)"
-                    :value="typeof field.value === 'string' ? field.value : ''"
-                    :type="field.type === 'url' ? 'url' : 'text'"
-                    class="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm transition-shadow outline-none focus:ring-1 focus:ring-ring sm:h-8"
-                    @input="setCustomTextField(field.fieldId, $event)"
-                  />
-                  <input
-                    v-else-if="field.type === 'number'"
-                    :value="typeof field.value === 'number' ? field.value : ''"
-                    type="number"
-                    class="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm transition-shadow outline-none focus:ring-1 focus:ring-ring sm:h-8"
-                    @input="setCustomNumberField(field.fieldId, $event)"
-                  />
-                  <input
-                    v-else-if="field.type === 'date'"
-                    :value="typeof field.value === 'string' ? field.value : ''"
-                    type="date"
-                    class="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm transition-shadow outline-none focus:ring-1 focus:ring-ring sm:h-8"
-                    @input="setCustomDateField(field.fieldId, $event)"
-                  />
-                  <span v-else class="flex h-10 items-center rounded-lg border border-input bg-background px-3 sm:h-8">
-                    <input
-                      type="checkbox"
-                      class="size-4 rounded-xs border-input accent-primary"
-                      :checked="field.value === true"
-                      :aria-label="field.label"
-                      @change="setCustomBooleanField(field.fieldId, $event)"
-                    />
-                  </span>
-                </label>
+                <CustomMetadataValueInput
+                  v-for="field in form.customMetadata"
+                  :key="field.fieldId"
+                  v-model="field.value"
+                  :label="field.label"
+                  :type="field.type"
+                />
               </div>
             </div>
           </section>
@@ -1315,7 +1259,7 @@ function handleCoverChanged(medium: CoverMedium | null) {
                   :is-updating="isUpdatingLock"
                   @toggle="handleLockToggle"
                 >
-                  <input v-model="form.isbn13" maxlength="13" :class="controlClass(!form.isbn13, true)" :disabled="isLocked('isbn13')" />
+                  <IdentifierInput v-model="form.isbn13" kind="isbn" :class="controlClass(!form.isbn13, true)" :disabled="isLocked('isbn13')" />
                 </MetadataFieldLabel>
 
                 <MetadataFieldLabel
@@ -1326,7 +1270,7 @@ function handleCoverChanged(medium: CoverMedium | null) {
                   :is-updating="isUpdatingLock"
                   @toggle="handleLockToggle"
                 >
-                  <input v-model="form.isbn10" maxlength="10" :class="controlClass(!form.isbn10, true)" :disabled="isLocked('isbn10')" />
+                  <IdentifierInput v-model="form.isbn10" kind="isbn" :class="controlClass(!form.isbn10, true)" :disabled="isLocked('isbn10')" />
                 </MetadataFieldLabel>
 
                 <MetadataFieldLabel
@@ -1426,9 +1370,10 @@ function handleCoverChanged(medium: CoverMedium | null) {
                     >
                       {{ label }}
                     </label>
-                    <input
+                    <IdentifierInput
                       :id="`provider-id-${field}`"
                       v-model="form[field]"
+                      :kind="IDENTIFIER_INPUT_KIND_BY_FIELD[field]"
                       class="h-8 min-w-0 flex-1 rounded-xs border border-transparent bg-transparent px-1.5 font-mono text-xs transition-shadow outline-none hover:border-input focus:border-input focus:bg-background focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50 sm:h-7"
                       :disabled="isLocked(field)"
                     />

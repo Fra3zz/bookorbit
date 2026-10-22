@@ -9,6 +9,10 @@ import { scalePublisherFontSizes } from '../lib/publisher-font-sizes'
 import type { EpubBookInfo, EpubReaderSettings } from '@bookorbit/types'
 
 export interface RelocateDetail {
+  /** Why the view moved: a user's `page`/`snap`/`scroll`, a programmatic `navigation`, or an `anchor` relayout. */
+  reason?: string
+  /** The view is still opening the book at its starting position. */
+  restoring?: boolean
   cfi?: string | null
   fraction?: number
   index?: number
@@ -254,18 +258,7 @@ export function useFoliate(
       view.addEventListener('relocate', (e: Event) => {
         const detail = (e as CustomEvent).detail
         fraction.value = detail?.fraction ?? 0
-        if (import.meta.env.DEV) {
-          console.info('[foliate.relocate]', {
-            source: detail?.source ?? null,
-            koboLocationType: detail?.koboLocationType ?? null,
-            koboLocationValue: detail?.koboLocationValue ?? null,
-            contentSourceProgressPercent: detail?.contentSourceProgressPercent ?? null,
-            koreaderProgress: detail?.koreaderProgress ?? null,
-            fraction: detail?.fraction ?? null,
-            cfi: detail?.cfi ?? null,
-          })
-        }
-        onRelocate?.(detail)
+        onRelocate?.(initialNavigationPending ? { ...detail, restoring: true } : detail)
       })
 
       view.addEventListener('error', (e: Event) => {
