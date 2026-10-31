@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatNumber } from '@/i18n/formatters'
 import { useRoute, useRouter } from 'vue-router'
@@ -54,11 +54,14 @@ const { coverUrl } = useCoverVersions()
 const { portraitCoverSize, gridGap } = useDisplaySettings()
 const { libraries, fetchLibraries } = useLibraries()
 
-const seriesId = computed(() => {
-  const raw = route.params.seriesId
+function parseSeriesId(raw: unknown): number | null {
   const value = typeof raw === 'string' ? Number(raw) : NaN
   return Number.isInteger(value) && value > 0 ? value : null
-})
+}
+
+// The shell keeps this view alive per path, so the id is fixed for the instance. Following the shared
+// route would reset the list every time the reader leaves and comes back.
+const seriesId = shallowRef(parseSeriesId(route.params.seriesId))
 
 const {
   seriesInfo,
@@ -110,6 +113,8 @@ const canEditMetadata = computed(() => hasPermissionInAnyLibrary('library_edit_m
 const safeLeadDescription = useSafeHtml(() => leadBook.value?.description)
 const visibleSeriesAuthors = computed(() => (seriesInfo.value?.authors ?? []).slice(0, 5))
 const hiddenSeriesAuthorsCount = computed(() => Math.max(0, (seriesInfo.value?.authors.length ?? 0) - visibleSeriesAuthors.value.length))
+const ownedVolumeCount = computed(() => seriesInfo.value?.ownedVolumeCount ?? seriesInfo.value?.bookCount ?? 0)
+const readVolumeCount = computed(() => seriesInfo.value?.readVolumeCount ?? seriesInfo.value?.readCount ?? 0)
 const addToCollectionOpen = ref(false)
 const addToCollectionBookId = ref<number | null>(null)
 const leadFallbackStyle = computed(() => {
@@ -415,6 +420,17 @@ onUnmounted(() => {
   observer?.disconnect()
 })
 
+// Anything that remounts the books section replaces the sentinel, and the observer has to follow it.
+watch(
+  sentinel,
+  (element, previous) => {
+    if (!observer) return
+    if (previous) observer.unobserve(previous)
+    if (element) observer.observe(element)
+  },
+  { flush: 'post' },
+)
+
 watch(
   [books, total],
   ([newBooks, newTotal]) => {
@@ -429,12 +445,6 @@ watch(
 
 watch([sort, order, libraryId], () => {
   void loadBooks({ reset: true, keepPreviousData: true })
-})
-
-watch(seriesId, (newSeriesId) => {
-  if (newSeriesId !== null) {
-    void loadBooks({ reset: true })
-  }
 })
 
 watch(
@@ -538,7 +548,7 @@ defineOptions({ name: 'SeriesDetailView' })
                 <div class="min-w-0">
                   <h1 class="text-xl font-bold text-foreground">{{ seriesInfo.name }}</h1>
                   <div class="mt-2 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                    <span>{{ t('series.detail.bookCount', { count: seriesInfo.bookCount }) }}</span>
+                    <span>{{ t('series.card.volumeCount', { count: ownedVolumeCount }) }}</span>
                     <span v-if="visibleSeriesAuthors.length > 0">
                       {{ t('series.detail.byAuthors', { authors: visibleSeriesAuthors.join(', ') }) }}
                       <span v-if="hiddenSeriesAuthorsCount > 0"> {{ t('series.detail.moreAuthors', { count: hiddenSeriesAuthorsCount }) }}</span>
@@ -558,10 +568,10 @@ defineOptions({ name: 'SeriesDetailView' })
               </div>
 
               <div class="mt-3 grid max-w-md gap-3 sm:grid-cols-2">
-                <SeriesCompletionBar :read-count="seriesInfo.readCount" :total-count="seriesInfo.bookCount" />
+                <SeriesCompletionBar :read-count="readVolumeCount" :total-count="ownedVolumeCount" />
                 <SeriesOwnershipBar
                   v-if="seriesInfo.expectedBookCount !== null"
-                  :owned-count="seriesInfo.bookCount"
+                  :owned-count="ownedVolumeCount"
                   :expected-count="seriesInfo.expectedBookCount"
                 />
               </div>
@@ -718,7 +728,7 @@ defineOptions({ name: 'SeriesDetailView' })
             />
           </template>
 
-          <div ref="sentinel" class="mt-4 flex h-8 items-center justify-center">
+          <div ref="sentinel" data-testid="series-books-sentinel" class="mt-4 flex h-8 items-center justify-center">
             <span v-if="loadingBooks" class="text-xs text-muted-foreground">{{ t('common.loading') }}</span>
             <span v-else-if="!hasMore && books.length > 0" class="text-xs text-muted-foreground">
               {{ t('series.detail.allBooksLoaded', { count: formatNumber(total) }) }}

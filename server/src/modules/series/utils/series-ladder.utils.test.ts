@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { SeriesMemberRow } from '../series.repository';
 import { computeSeriesGaps, resolveLadderRange } from './series-gaps.utils';
-import { buildVolumeLadder } from './series-ladder.utils';
+import { buildVolumeLadder, countSeriesVolumes } from './series-ladder.utils';
 
 function member(bookId: number, seriesIndex: string | null, status: string | null = null, title = `Book ${bookId}`): SeriesMemberRow {
   return { bookId, seriesIndex, title, status };
@@ -90,6 +90,7 @@ describe('buildVolumeLadder', () => {
     expect(ladder.truncated).toBe(true);
     expect(ladder.gaps).toEqual([]);
     expect(ladder.next?.bookId).toBe(1);
+    expect(ladder.counts).toBeNull();
   });
 
   it('caps a very long ladder and says so', () => {
@@ -98,6 +99,15 @@ describe('buildVolumeLadder', () => {
 
     expect(ladder.volumes).toHaveLength(60);
     expect(ladder.truncated).toBe(true);
+  });
+
+  it('counts every volume of a capped ladder, not just the drawn rungs', () => {
+    const members = Array.from({ length: 80 }, (_, i) => member(i + 1, String(i + 1), i < 60 ? 'read' : i === 60 ? 'reading' : null));
+    members.push(member(81, '1'), member(82, null, 'read'));
+    const ladder = build(members);
+
+    expect(ladder.counts).toEqual({ ownedVolumeCount: 81, readVolumeCount: 61, readingVolumeCount: 1 });
+    expect(ladder.counts).toEqual(countSeriesVolumes({ members, bookCount: members.length, expectedBookCount: null }));
   });
 
   describe('next volume', () => {
@@ -119,6 +129,56 @@ describe('buildVolumeLadder', () => {
     it('is null once every volume is read', () => {
       const ladder = build([member(1, '1', 'read'), member(2, '2', 'read')]);
       expect(ladder.next).toBeNull();
+    });
+  });
+});
+
+describe('countSeriesVolumes', () => {
+  it('counts ebook and audiobook copies at the same indexes once', () => {
+    const members = [member(1, '1'), member(2, '1', 'read'), member(3, '2', 'reading'), member(4, '2')];
+
+    expect(countSeriesVolumes({ members, bookCount: 4, expectedBookCount: 7 })).toEqual({
+      ownedVolumeCount: 2,
+      readVolumeCount: 1,
+      readingVolumeCount: 1,
+    });
+  });
+
+  it('uses the furthest status of every numbered volume', () => {
+    const members = [member(1, '1', 'reading'), member(2, '1', 'read'), member(3, '2'), member(4, '2', 'read'), member(5, '3', 'reading')];
+
+    expect(countSeriesVolumes({ members, bookCount: 5, expectedBookCount: null })).toEqual({
+      ownedVolumeCount: 3,
+      readVolumeCount: 2,
+      readingVolumeCount: 1,
+    });
+  });
+
+  it('keeps unnumbered and fractional books independent', () => {
+    const members = [member(1, '1', 'read'), member(2, null, 'read'), member(3, null), member(4, '1.5', 'read'), member(5, '1.5')];
+
+    expect(countSeriesVolumes({ members, bookCount: 5, expectedBookCount: null })).toEqual({
+      ownedVolumeCount: 5,
+      readVolumeCount: 3,
+      readingVolumeCount: 0,
+    });
+  });
+
+  it('matches the ladder fallback when a zero index invalidates its numbered range', () => {
+    const members = [member(1, '0', 'read'), member(2, '1'), member(3, '1', 'read')];
+
+    expect(countSeriesVolumes({ members, bookCount: 3, expectedBookCount: null })).toEqual({
+      ownedVolumeCount: 3,
+      readVolumeCount: 2,
+      readingVolumeCount: 0,
+    });
+  });
+
+  it('returns zero counts for an empty series', () => {
+    expect(countSeriesVolumes({ members: [], bookCount: 0, expectedBookCount: null })).toEqual({
+      ownedVolumeCount: 0,
+      readVolumeCount: 0,
+      readingVolumeCount: 0,
     });
   });
 });

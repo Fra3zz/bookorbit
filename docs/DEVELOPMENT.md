@@ -2,13 +2,13 @@
 
 Everything you need to work in this codebase: architecture, setup, workflows, conventions, and commands.
 
-For the contribution process (issues, PRs, review), see [CONTRIBUTING.md](CONTRIBUTING.md). For localization and Crowdin workflow details, see [LOCALIZATION.md](LOCALIZATION.md). For test architecture and E2E suite details, see [TESTING.md](TESTING.md).
+For the contribution process (issues, PRs, review), see [CONTRIBUTING.md](../CONTRIBUTING.md). For localization and Crowdin workflow details, see [LOCALIZATION.md](LOCALIZATION.md). For test architecture and E2E suite details, see [TESTING.md](TESTING.md).
 
 ---
 
 ## Architecture Overview
 
-BookOrbit is a pnpm monorepo with three workspaces: a Vue 3 single-page app, a NestJS API server, and a shared types package.
+BookOrbit is a pnpm monorepo with a Vue 3 single-page app, a NestJS API server, shared packages, and optional worker processes.
 
 ```mermaid
 graph LR
@@ -17,10 +17,12 @@ graph LR
     DB["PostgreSQL<br/><small>Drizzle ORM</small>"]
     WS["WebSocket<br/><small>Socket.IO</small>"]
     Types["Shared Types<br/><small>@bookorbit/types</small>"]
+    Worker["Read-aloud worker<br/><small>STAlign + QuartzNet</small>"]
 
     Client -- "HTTP (fetch)" --> Server
     Client <-. "real-time events" .-> WS
     Server --> DB
+    Server -. "private HTTP" .-> Worker
     Server --> WS
     Types -.- Client
     Types -.- Server
@@ -33,6 +35,7 @@ graph LR
 | Database     | PostgreSQL 18, pgvector         | Docker container  |
 | Shared types | TypeScript                      | `packages/types/` |
 | Real-time    | Socket.IO                       | Server + Client   |
+| Workers      | Node.js sidecars                | `workers/`        |
 
 ---
 
@@ -61,6 +64,8 @@ bookorbit/
 ├── packages/
 │   └── types/               # Shared TypeScript types
 │       └── src/             # Exported via @bookorbit/types
+├── workers/
+│   └── read-aloud/          # Optional STAlign and QuartzNet worker
 ├── scripts/                 # Bootstrap, DB reset, E2E orchestration
 ├── docker/                  # Postgres init scripts (extensions)
 ├── .github/                 # CI workflows, PR/issue templates
@@ -100,7 +105,7 @@ git clone https://github.com/<your-username>/bookorbit.git
 cd bookorbit
 ```
 
-If you are an external contributor, fork first and clone your fork. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+If you are an external contributor, fork first and clone your fork. See [CONTRIBUTING.md](../CONTRIBUTING.md) for details.
 
 #### Step 2 - Create your environment file
 
@@ -224,19 +229,18 @@ pnpm --filter @bookorbit/types dev
 
 These are the variables you are most likely to need during development. See `server/.env.example` for the full list with comments.
 
-| Variable                 | Purpose                                            | Default (dev)                                             |
-| ------------------------ | -------------------------------------------------- | --------------------------------------------------------- |
-| `DATABASE_URL`           | PostgreSQL connection string                       | `postgres://bookorbit:bookorbit@localhost:5432/bookorbit` |
-| `PORT`                   | Server listen port                                 | `3000`                                                    |
-| `HOST`                   | Server listen address (IPv4 or IPv6)               | `0.0.0.0`                                                 |
-| `NODE_ENV`               | Runtime mode                                       | `development`                                             |
-| `JWT_SECRET`             | Signing key for auth tokens                        | `change-me-in-production`                                 |
-| `PODCAST_ENCRYPTION_KEY` | Podcast URL encryption key; required in production | Falls back to `JWT_SECRET` in development                 |
-| `APP_DATA_PATH`          | Storage for covers, avatars, cache                 | `../local/data`                                           |
-| `LIBRARY_BROWSE_ROOT`    | Library folder picker root                         | `/`                                                       |
-| `APP_URL`                | Base URL for email links                           | `http://localhost:6263`                                   |
-| `SWAGGER_ENABLED`        | Serve Swagger UI and OpenAPI JSON                  | `false`                                                   |
-| `DISABLE_LOCAL_AUTH`     | Disable password authentication                    | `false`                                                   |
+| Variable              | Purpose                              | Default (dev)                                             |
+| --------------------- | ------------------------------------ | --------------------------------------------------------- |
+| `DATABASE_URL`        | PostgreSQL connection string         | `postgres://bookorbit:bookorbit@localhost:5432/bookorbit` |
+| `PORT`                | Server listen port                   | `3000`                                                    |
+| `HOST`                | Server listen address (IPv4 or IPv6) | `0.0.0.0`                                                 |
+| `NODE_ENV`            | Runtime mode                         | `development`                                             |
+| `JWT_SECRET`          | Signing key for auth tokens          | `change-me-in-production`                                 |
+| `APP_DATA_PATH`       | Storage for covers, avatars, cache   | `../local/data`                                           |
+| `LIBRARY_BROWSE_ROOT` | Library folder picker root           | `/`                                                       |
+| `APP_URL`             | Base URL for email links             | `http://localhost:6263`                                   |
+| `SWAGGER_ENABLED`     | Serve Swagger UI and OpenAPI JSON    | `false`                                                   |
+| `DISABLE_LOCAL_AUTH`  | Disable password authentication      | `false`                                                   |
 
 For a native server accessible only on this machine, set `HOST=127.0.0.1` in `server/.env`. `HOST` accepts an IPv4 or IPv6 address without a port or brackets, such as `::1` for IPv6 loopback. An unset or blank value keeps the existing `0.0.0.0` default. `PORT` continues to select the listen port.
 
@@ -310,6 +314,7 @@ pnpm run db:seed
 | `pnpm run test`                  | Server + client unit tests       |
 | `pnpm run test:server`           | Server unit tests only           |
 | `pnpm run test:client`           | Client unit tests only           |
+| `pnpm run test:worker`           | Read-aloud worker tests only     |
 | `cd server && pnpm test:watch`   | Server tests in watch mode       |
 | `pnpm run e2e:run -- <suite-id>` | Run a single E2E suite           |
 | `pnpm run e2e:all`               | Run all E2E suites sequentially  |
@@ -528,6 +533,7 @@ All commands are run from the repository root unless noted otherwise.
 | `pnpm run test`                  | Run server + client unit tests   |
 | `pnpm run test:server`           | Run server unit tests            |
 | `pnpm run test:client`           | Run client unit tests            |
+| `pnpm run test:worker`           | Run read-aloud worker tests      |
 | `cd server && pnpm test:watch`   | Server tests in watch mode       |
 | `pnpm run coverage`              | Unit tests with coverage reports |
 | `pnpm run coverage:server`       | Server coverage only             |

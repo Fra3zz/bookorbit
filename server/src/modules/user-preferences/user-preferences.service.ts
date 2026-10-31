@@ -4,8 +4,6 @@ import {
   ANNOTATION_COLOR_NAME_MAX_LENGTH,
   ANNOTATION_COLOR_NAME_PREFERENCES_DEFAULTS,
   AUTHOR_COVER_SHAPES,
-  PODCAST_PLAYLIST_MAX_SAVED,
-  PODCAST_PLAYLIST_MAX_SHOWS,
   BACKGROUND_IDS,
   BOOK_COVER_DISPLAY_MODES,
   BOOK_DETAIL_COVER_TINTS,
@@ -18,6 +16,7 @@ import {
   COVER_SEARCH_DEFAULT_PROVIDERS,
   COVER_SIZE_SCOPES,
   DEFAULT_BOOK_REQUEST_PREFERENCES,
+  DEFAULT_READ_ALOUD_PREFERENCES,
   RETIRED_BOOK_REQUEST_PREFERENCE_FIELDS,
   DEFAULT_COVER_SEARCH_PROVIDER,
   FONT_FAMILY_NAME_MAX_LENGTH,
@@ -41,8 +40,7 @@ import {
   type DisplayPreferences,
   type CoverSearchPreferences,
   type LocalePreferences,
-  type PodcastPlaybackPreferences,
-  type PodcastPlaylistPreferences,
+  type ReadAloudPreferences,
   type ServerFontPreferences,
   type ThemePreferences,
   type WhatsNewPreferences,
@@ -151,6 +149,20 @@ const BOOK_REQUEST_PREFERENCES_SCHEMA = z.preprocess(
     .strict(),
 );
 
+/**
+ * Any well-formed language subtag, not only the current speech model's: the model's language list
+ * can grow, and the dialog ignores a stored language it cannot offer.
+ */
+const READ_ALOUD_PREFERENCES_SCHEMA = z
+  .object({
+    defaultLanguage: z
+      .string()
+      .regex(/^[a-z]{2,3}$/, 'must be a lowercase language subtag')
+      .nullable()
+      .default(null),
+  })
+  .strict() satisfies z.ZodType<ReadAloudPreferences>;
+
 const LOCALE_PREFERENCES_SCHEMA = z
   .object({
     locale: z.enum(SUPPORTED_LOCALES),
@@ -165,24 +177,6 @@ const WHATS_NEW_PREFERENCES_SCHEMA = z
   .strict();
 
 const WHATS_NEW_DEFAULTS: WhatsNewPreferences = { lastSeenVersion: null, popupEnabled: true };
-const PODCAST_PLAYBACK_DEFAULTS: PodcastPlaybackPreferences = {
-  defaultPlaybackRate: 1,
-  volume: 1,
-  skipBackwardSeconds: 15,
-  skipForwardSeconds: 30,
-  podcastPlaybackRates: {},
-};
-
-const PODCAST_PLAYBACK_PREFERENCES_SCHEMA = z
-  .object({
-    defaultPlaybackRate: z.number().min(0.5).max(3),
-    volume: z.number().min(0).max(1).default(1),
-    skipBackwardSeconds: z.number().int().min(5).max(120),
-    skipForwardSeconds: z.number().int().min(5).max(120),
-    podcastPlaybackRates: z.record(z.string().regex(/^\d+$/), z.number().min(0.5).max(3)).refine((rates) => Object.keys(rates).length <= 1000),
-  })
-  .strict();
-
 // Bounded by the server font cap: a reader cannot hide more families than can exist.
 const SERVER_FONT_PREFERENCES_SCHEMA = z
   .object({
@@ -220,35 +214,6 @@ const ANNOTATION_COLOR_NAME_PREFERENCES_SCHEMA = z
   })
   .strict() satisfies z.ZodType<AnnotationColorNamePreferences>;
 
-const PODCAST_PLAYLIST_RULES_SCHEMA = z
-  .object({
-    filter: z.enum(['latest', 'downloaded', 'in_progress', 'unplayed', 'finished']),
-    sort: z.enum(['newest', 'oldest', 'shortest', 'longest', 'recently_listened']),
-    minDurationMinutes: z.number().int().min(1).max(1440).nullable(),
-    maxDurationMinutes: z.number().int().min(1).max(1440).nullable(),
-    publishedWithinDays: z.number().int().min(1).max(3650).nullable(),
-    podcastIds: z.array(z.number().int().positive()).max(PODCAST_PLAYLIST_MAX_SHOWS),
-    followedOnly: z.boolean(),
-  })
-  .strict();
-
-const PODCAST_PLAYLISTS_PREFERENCES_SCHEMA = z
-  .object({
-    playlists: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1).max(64),
-            name: z.string().trim().min(1).max(80),
-            libraryId: z.number().int().positive(),
-            rules: PODCAST_PLAYLIST_RULES_SCHEMA,
-          })
-          .strict(),
-      )
-      .max(PODCAST_PLAYLIST_MAX_SAVED),
-  })
-  .strict();
-
 @Injectable()
 export class UserPreferencesService {
   private readonly logger = new Logger(UserPreferencesService.name);
@@ -263,34 +228,6 @@ export class UserPreferencesService {
       lastSeenVersion: stored.lastSeenVersion ?? null,
       popupEnabled: stored.popupEnabled ?? true,
     };
-  }
-
-  async getPodcastPlaybackPreferences(userId: number): Promise<PodcastPlaybackPreferences> {
-    const row = await this.repo.findByCategory(userId, 'podcast-playback');
-    if (!row) return { ...PODCAST_PLAYBACK_DEFAULTS, podcastPlaybackRates: {} };
-    const stored = PODCAST_PLAYBACK_PREFERENCES_SCHEMA.safeParse(row.data);
-    return stored.success ? stored.data : { ...PODCAST_PLAYBACK_DEFAULTS, podcastPlaybackRates: {} };
-  }
-
-  async upsertPodcastPlaybackPreferences(userId: number, data: Record<string, unknown>): Promise<void> {
-    const result = PODCAST_PLAYBACK_PREFERENCES_SCHEMA.safeParse(data);
-    if (!result.success) throw new BadRequestException('Invalid podcast playback preferences');
-    await this.repo.upsert(userId, 'podcast-playback', result.data);
-  }
-
-  async getPodcastPlaylistPreferences(userId: number): Promise<PodcastPlaylistPreferences> {
-    const row = await this.repo.findByCategory(userId, 'podcast-playlists');
-    if (!row) return { playlists: [] };
-    const stored = PODCAST_PLAYLISTS_PREFERENCES_SCHEMA.safeParse(row.data);
-    return stored.success ? stored.data : { playlists: [] };
-  }
-
-  async upsertPodcastPlaylistPreferences(userId: number, data: Record<string, unknown>): Promise<void> {
-    const result = PODCAST_PLAYLISTS_PREFERENCES_SCHEMA.safeParse(data);
-    if (!result.success) throw new BadRequestException('Invalid podcast playlist preferences');
-    const ids = new Set(result.data.playlists.map((playlist) => playlist.id));
-    if (ids.size !== result.data.playlists.length) throw new BadRequestException('Podcast playlist ids must be unique');
-    await this.repo.upsert(userId, 'podcast-playlists', result.data);
   }
 
   async upsertWhatsNewPreferences(userId: number, data: Record<string, unknown>): Promise<void> {
@@ -470,6 +407,24 @@ export class UserPreferencesService {
     }
 
     await this.repo.upsert(userId, 'book-requests', result.data);
+  }
+
+  async getReadAloudPreferences(userId: number): Promise<ReadAloudPreferences> {
+    const row = await this.repo.findByCategory(userId, 'read-aloud');
+    const result = READ_ALOUD_PREFERENCES_SCHEMA.safeParse(row?.data);
+    return result.success ? result.data : { ...DEFAULT_READ_ALOUD_PREFERENCES };
+  }
+
+  async upsertReadAloudPreferences(userId: number, data: Record<string, unknown>): Promise<void> {
+    const result = READ_ALOUD_PREFERENCES_SCHEMA.safeParse(data);
+    if (!result.success) {
+      const firstIssue = result.error.issues[0];
+      const issuePath = firstIssue?.path.length ? firstIssue.path.join('.') : 'settings';
+      const issueMessage = firstIssue?.message ?? 'Invalid settings payload';
+      throw new BadRequestException(`Invalid read-aloud preferences at "${issuePath}": ${issueMessage}`);
+    }
+
+    await this.repo.upsert(userId, 'read-aloud', result.data);
   }
 
   async upsertThemePreferences(userId: number, data: Record<string, unknown>): Promise<void> {

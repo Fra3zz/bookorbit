@@ -38,6 +38,16 @@ export type SeriesSummary = {
   libraryNames: string[];
   /** Total a metadata provider reports for the series, or null when no provider has said. */
   expectedBookCount: number | null;
+  /**
+   * Logical volumes owned across the whole series, collapsing book records that share a
+   * whole-numbered position. Unlike `volumes`, never capped; falls back to `bookCount` when the
+   * members could not all be read.
+   */
+  ownedVolumeCount: number;
+  /** Owned logical volumes whose furthest status is read. */
+  readVolumeCount: number;
+  /** Owned logical volumes whose furthest status is reading. */
+  readingVolumeCount: number;
   volumes: SeriesVolumeSlot[];
   volumesTruncated: boolean;
   /** Missing numbers, capped at {@link SERIES_GAP_PREVIEW_LIMIT}. */
@@ -71,6 +81,10 @@ export type SeriesDetail = {
   name: string;
   bookCount: number;
   readCount: number;
+  /** Logical volumes owned, collapsing book records that share a whole-numbered series position. */
+  ownedVolumeCount?: number;
+  /** Owned logical volumes whose furthest status is read. */
+  readVolumeCount?: number;
   authors: string[];
   possibleGaps: number[];
   /** Total books a metadata provider reports for the series, or null when no provider has told us. */

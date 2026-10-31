@@ -2,32 +2,42 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { CircleCheck, CircleX, FolderOpen, FolderPlus, FolderSearch, Info, Loader2, Plus, RefreshCw, Trash2, TriangleAlert } from '@lucide/vue'
-import type { LibraryStats, LibraryType } from '@bookorbit/types'
+import type { LibraryStats, OrganizationMode } from '@bookorbit/types'
 import { formatBytes } from '@/lib/formatting'
 import LibraryFormatBar from '@/features/settings/libraries/components/LibraryFormatBar.vue'
 import type { FolderCheck } from '../composables/useLibraryCreator'
 import { useLibraryFolderSelection } from '../composables/useLibraryFolderSelection'
 import FolderPickerModal from './FolderPickerModal.vue'
 import LibraryCreatorCard from './LibraryCreatorCard.vue'
-import LibraryCreatorLocalFolders from './LibraryCreatorLocalFolders.vue'
 
 const { t } = useI18n()
 
 const props = withDefaults(
   defineProps<{
     folders: string[]
-    localFolders: string[]
-    libraryType: LibraryType
     checks?: Record<string, FolderCheck>
     stats?: LibraryStats | null
+    libraryName?: string
+    libraryIcon?: string | null
+    libraryId?: number | null
+    organizationMode?: OrganizationMode
+    organizationModeLocked?: boolean
   }>(),
-  { checks: () => ({}), stats: null },
+  {
+    checks: () => ({}),
+    stats: null,
+    libraryName: '',
+    libraryIcon: null,
+    libraryId: null,
+    organizationMode: 'book_per_folder',
+    organizationModeLocked: false,
+  },
 )
 
 const emit = defineEmits<{
   'update:folders': [value: string[]]
-  'update:localFolders': [value: string[]]
   'update:pickerOpen': [value: boolean]
+  'update:organizationMode': [value: OrganizationMode]
   check: [paths: string[]]
 }>()
 
@@ -47,14 +57,12 @@ const {
   updatePickerOpen: (open) => emit('update:pickerOpen', open),
 })
 
-const podcast = computed(() => props.libraryType === 'podcasts')
-const canAdd = computed(() => !podcast.value || props.folders.length === 0)
 const checkedFolders = computed(() => props.folders.map((folder) => props.checks[folder]).filter((check) => check?.state === 'checked'))
 const matchingFiles = computed(() =>
   checkedFolders.value.reduce((sum, check) => sum + (check.state === 'checked' && check.accessible ? check.fileCount : 0), 0),
 )
 const anyChecking = computed(() => props.folders.some((folder) => props.checks[folder]?.state === 'checking'))
-const showStats = computed(() => !podcast.value && props.stats !== null && props.stats.totalBooks > 0)
+const showStats = computed(() => props.stats !== null && props.stats.totalBooks > 0)
 
 type FolderStatus =
   | { kind: 'unchecked' }
@@ -100,26 +108,18 @@ function handleRemove(folder: string) {
   removeFolder(folder)
 }
 
-function handleLocalFoldersUpdate(value: string[]) {
-  emit('update:localFolders', value)
-}
-
-function handleNestedPickerChange(value: boolean) {
-  emit('update:pickerOpen', value)
-}
-
 function addBrowsedFolders(paths: string[]) {
-  addSelectedFolders(podcast.value ? paths.slice(0, 1) : paths)
+  addSelectedFolders(paths)
+}
+
+function handleOrganizationMode(value: OrganizationMode) {
+  emit('update:organizationMode', value)
 }
 </script>
 
 <template>
   <div class="flex flex-col gap-3">
-    <LibraryCreatorCard
-      flush
-      label-id="library-folders-title"
-      :label="podcast ? t('library.creator.folders.storageTitle') : t('library.creator.folders.listTitle')"
-    >
+    <LibraryCreatorCard flush label-id="library-folders-title" :label="t('library.creator.folders.listTitle')">
       <template v-if="folders.length > 0" #meta>
         <template v-if="checkedFolders.length > 0">
           <span>{{ t('library.creator.folders.matchingFiles', { count: matchingFiles }) }}</span>
@@ -206,7 +206,7 @@ function addBrowsedFolders(paths: string[]) {
         </span>
         <p class="text-sm font-semibold text-foreground">{{ t('library.creator.folders.noneAdded') }}</p>
         <p class="mt-0.5 text-xs text-muted-foreground">
-          {{ podcast ? t('library.creator.folders.emptyPodcastHint') : t('library.creator.folders.emptyHint') }}
+          {{ t('library.creator.folders.emptyHint') }}
         </p>
       </div>
 
@@ -214,11 +214,7 @@ function addBrowsedFolders(paths: string[]) {
         <LibraryFormatBar show-legend :counts="stats.formatCounts" :legend-limit="6" />
       </div>
 
-      <form
-        v-if="canAdd"
-        class="flex flex-wrap items-start gap-2 border-t border-border bg-background/50 px-3 py-2.5"
-        @submit.prevent="addManualFolder"
-      >
+      <form class="flex flex-wrap items-start gap-2 border-t border-border bg-background/50 px-3 py-2.5" @submit.prevent="addManualFolder">
         <div class="min-w-0 flex-[1_1_14rem]">
           <label for="manual-folder-path" class="sr-only">{{ t('library.creator.folders.absolutePath') }}</label>
           <div class="relative">
@@ -228,7 +224,7 @@ function addBrowsedFolders(paths: string[]) {
               v-model="manualPath"
               type="text"
               dir="ltr"
-              :placeholder="podcast ? t('library.creator.folders.pastePodcastPlaceholder') : t('library.creator.folders.pastePlaceholder')"
+              :placeholder="t('library.creator.folders.pastePlaceholder')"
               class="h-9 w-full rounded-md border border-input bg-background pe-3 ps-9 font-mono text-[12.5px] text-foreground placeholder:font-sans placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               :aria-invalid="manualError ? 'true' : undefined"
               :aria-describedby="manualError ? 'manual-folder-error' : undefined"
@@ -255,18 +251,22 @@ function addBrowsedFolders(paths: string[]) {
       </form>
     </LibraryCreatorCard>
 
-    <p v-if="!podcast" class="flex items-start gap-1.5 text-xs text-muted-foreground">
+    <p class="flex items-start gap-1.5 text-xs text-muted-foreground">
       <Info :size="13" class="mt-px shrink-0" aria-hidden="true" />
       <span>{{ t('library.creator.folders.checkHint') }}</span>
     </p>
-
-    <LibraryCreatorLocalFolders
-      v-if="podcast"
-      :local-folders="localFolders"
-      @update:local-folders="handleLocalFoldersUpdate"
-      @update:picker-open="handleNestedPickerChange"
-    />
   </div>
 
-  <FolderPickerModal v-if="pickerOpen" :selected-paths="folders" @select="addBrowsedFolders" @close="closePicker" />
+  <FolderPickerModal
+    v-if="pickerOpen"
+    :selected-paths="folders"
+    :library-name="libraryName"
+    :library-icon="libraryIcon"
+    :library-id="libraryId"
+    :organization-mode="organizationMode"
+    :organization-mode-locked="organizationModeLocked"
+    @select="addBrowsedFolders"
+    @close="closePicker"
+    @update:organization-mode="handleOrganizationMode"
+  />
 </template>

@@ -1109,7 +1109,7 @@ function BookOrbitCatalog:titleForSection(section)
 end
 
 function BookOrbitCatalog:paramsForEntry(section, entry)
-    local params = { sort = "title" }
+    local params = { sort = section == "series" and "series" or "title" }
     if section == "libraries" then
         params.libraryId = tonumber(entry.id)
     elseif section == "collections" then
@@ -1415,7 +1415,7 @@ end
 function BookOrbitCatalog:showSortDialog(item)
     local dialog
     local buttons = {}
-    for _, sort in ipairs(SORTS) do
+    for _i, sort in ipairs(SORTS) do
         table.insert(buttons, {
             {
                 text = sort.text .. (item.current_sort == sort.id and " *" or ""),

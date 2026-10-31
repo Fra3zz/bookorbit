@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, defineComponent, nextTick, reactive, ref, type PropType } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
-import type { BookCard, SeriesBooksPage, SeriesDetail } from '@bookorbit/types'
+import type { BookCard, SeriesDetail } from '@bookorbit/types'
 import SeriesDetailView from './SeriesDetailView.vue'
+import SeriesCompletionBar from '../components/SeriesCompletionBar.vue'
 
 const GROUP_BY_MEDIA_STORAGE_KEY = 'bookorbit:series-detail:group-by-media'
 
 class MockIntersectionObserver {
+  static instances: MockIntersectionObserver[] = []
+  constructor() {
+    MockIntersectionObserver.instances.push(this)
+  }
   observe = vi.fn<(target: Element) => void>()
   unobserve = vi.fn<(target: Element) => void>()
   disconnect = vi.fn<() => void>()
@@ -302,6 +307,7 @@ describe('SeriesDetailView', () => {
     mocks.api.mockReset()
     mocks.api.mockResolvedValue({ ok: false })
 
+    MockIntersectionObserver.instances = []
     vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
   })
 
@@ -319,7 +325,7 @@ describe('SeriesDetailView', () => {
     expect(wrapper.find('[data-testid="series-media-group-books"]').exists()).toBe(true)
   })
 
-  it('shows the ownership bar only once a provider has supplied a series total', async () => {
+  it('falls back to book counts when a server does not return volume counts', async () => {
     mocks.seriesInfo = ref(makeSeriesInfo({ bookCount: 4, expectedBookCount: 7 }))
 
     const wrapper = mountView()
@@ -328,7 +334,35 @@ describe('SeriesDetailView', () => {
     const bar = wrapper.get('[role="progressbar"]')
     expect(bar.attributes('aria-valuenow')).toBe('4')
     expect(bar.attributes('aria-valuemax')).toBe('7')
+    expect(wrapper.text()).toContain('4 volumes')
+    const completion = wrapper.getComponent(SeriesCompletionBar)
+    expect(completion.props('readCount')).toBe(0)
+    expect(completion.props('totalCount')).toBe(4)
     expect(wrapper.text()).toContain('4 of 7')
+  })
+
+  it('uses logical volume counts for the header, reading progress, and ownership', async () => {
+    mocks.seriesInfo = ref(
+      makeSeriesInfo({
+        bookCount: 4,
+        readCount: 2,
+        ownedVolumeCount: 2,
+        readVolumeCount: 1,
+        expectedBookCount: 7,
+      }),
+    )
+
+    const wrapper = mountView()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('2 volumes')
+    const completion = wrapper.getComponent(SeriesCompletionBar)
+    expect(completion.props('readCount')).toBe(1)
+    expect(completion.props('totalCount')).toBe(2)
+    const ownership = wrapper.get('[role="progressbar"]')
+    expect(ownership.attributes('aria-valuenow')).toBe('2')
+    expect(ownership.attributes('aria-valuemax')).toBe('7')
+    expect(wrapper.text()).toContain('2 of 7')
   })
 
   it('hides the ownership bar when no provider total is known', async () => {
@@ -512,32 +546,41 @@ describe('SeriesDetailView', () => {
     expect(secondStyle).toBe(style)
   })
 
-  it('ignores stale lead preview responses after route id becomes invalid', async () => {
-    let resolveLeadPreview!: (value: SeriesBooksPage) => void
-    mocks.fetchSeriesBooks.mockImplementationOnce(
-      () =>
-        new Promise<SeriesBooksPage>((resolve) => {
-          resolveLeadPreview = resolve
-        }),
-    )
+  it('keeps its loaded books when the route moves on and back while the view is kept alive', async () => {
+    mountView()
+    await flushPromises()
+    mocks.loadBooks.mockClear()
+    mocks.fetchSeriesBooks.mockClear()
 
-    const wrapper = mountView()
-    await nextTick()
-
-    mocks.route.params.seriesId = 'invalid'
-    await nextTick()
-
-    resolveLeadPreview({
-      items: [makeBook({ id: 7, seriesIndex: '1', hasCover: true })],
-      total: 1,
-      page: 0,
-      size: 8,
-      seriesInfo: makeSeriesInfo(),
-    })
+    mocks.route.params.seriesId = ''
+    await flushPromises()
+    mocks.route.params.seriesId = '99'
+    await flushPromises()
+    mocks.route.params.seriesId = '42'
     await flushPromises()
 
-    expect(mocks.api).not.toHaveBeenCalled()
-    expect(wrapper.find('[data-testid="lead-cover-artwork"]').exists()).toBe(false)
+    expect(mocks.loadBooks).not.toHaveBeenCalled()
+    expect(mocks.fetchSeriesBooks).not.toHaveBeenCalled()
+  })
+
+  it('observes the replacement sentinel when the books section remounts', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const observer = MockIntersectionObserver.instances[0]!
+    const firstSentinel = wrapper.get('[data-testid="series-books-sentinel"]').element
+    expect(observer.observe).toHaveBeenLastCalledWith(firstSentinel)
+
+    mocks.seriesInfo.value = null
+    await flushPromises()
+    expect(observer.unobserve).toHaveBeenCalledWith(firstSentinel)
+
+    mocks.seriesInfo.value = makeSeriesInfo()
+    await flushPromises()
+
+    const nextSentinel = wrapper.get('[data-testid="series-books-sentinel"]').element
+    expect(nextSentinel).not.toBe(firstSentinel)
+    expect(observer.observe).toHaveBeenLastCalledWith(nextSentinel)
   })
 
   it('loads all books and navigates to edit metadata, preserving the setBookContext when navigating away', async () => {

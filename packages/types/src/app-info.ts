@@ -2,8 +2,6 @@
  * Capabilities this server supports, advertised so a client can tell a newer server from an
  * older one before sending a field or calling a route the older one would reject. Append only:
  * a released client reads this list, so a value is never renamed or removed.
- *
- * Named apart from `APP_FEATURES` in app-features.ts, which holds the build-time feature flags.
  */
 export const SERVER_FEATURES = [
   "annotation-stars",
@@ -41,6 +39,16 @@ export const SERVER_FEATURES = [
   "relative-date-ranges",
   /** The `format` book filter accepts `epub:readalong` for EPUBs with media overlays. */
   "read-along-filter",
+  /**
+   * `GET /reading-history` (offset pages, the first carrying every month's size), `/summary`,
+   * `/:attemptId/marks` and `PATCH /:attemptId/rating`.
+   */
+  "reading-history",
+  /**
+   * `GET`/`PUT /reading-progress` and `DELETE /reading-progress/:fileId`: positions grouped by
+   * kind, several files saved in one request, and `editedAt` so the newer of two saves wins.
+   */
+  "reading-progress",
 ] as const;
 
 export type ServerFeature = (typeof SERVER_FEATURES)[number];

@@ -349,7 +349,7 @@ describe('KOReader plugin update source wiring', () => {
     expect(bookSync).toContain('if not ctx.snap.stats_row_ambiguous then return book and book.fileId or nil end');
     expect(bookSync).toContain('metadata_ambiguous = ctx.snap.metadata_ambiguous');
     expect(bookSync).toContain('if ctx.snap.stats_metadata_ambiguous then');
-    expect(bookSync).toContain('ctx.state:setMatched(match.hash, match.bookFileId, match.bookId, ctx.snap.file)');
+    expect(bookSync).toContain('ctx.state:setMatched(match.hash, match.bookFileId, match.bookId, ctx.snap.file, nil, match.positionCompatible)');
     expect(bookSync).toContain('if ctx.snap.stats_row_ambiguous then upload.bookFileId = stats_target.bookFileId end');
     expect(bookSync).not.toContain(
       'if book then\n        if ctx.snap.file and not book.file then\n            book.file = ctx.snap.file\n        end\n        return step(ctx, stepStats)\n    end',

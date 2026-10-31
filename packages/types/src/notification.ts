@@ -27,9 +27,10 @@ export const NotificationType = {
   BulkRenameCompleted: "bulk_rename_completed",
   BulkRenameFailed: "bulk_rename_failed",
   AchievementUnlocked: "achievement_unlocked",
-  PodcastEpisodePublished: "podcast_episode_published",
-  PodcastFeedUnhealthy: "podcast_feed_unhealthy",
-  PodcastDownloadFailed: "podcast_download_failed",
+  ReadAloudReady: "read_aloud_ready",
+  ReadAloudNeedsReview: "read_aloud_needs_review",
+  ReadAloudFailed: "read_aloud_failed",
+  ReadAloudReviewExpiring: "read_aloud_review_expiring",
 } as const;
 
 export type NotificationType = (typeof NotificationType)[keyof typeof NotificationType];
@@ -59,7 +60,7 @@ export const NOTIFICATION_CATEGORY_IDS = [
   "fileRename",
   "bulkRename",
   "achievements",
-  "podcasts",
+  "readAloud",
 ] as const;
 
 export type NotificationCategory = (typeof NOTIFICATION_CATEGORY_IDS)[number];
@@ -103,9 +104,10 @@ export const NOTIFICATION_TYPE_META: Record<NotificationType, NotificationTypeMe
   [NotificationType.BulkRenameCompleted]: { category: "bulkRename", severity: "success" },
   [NotificationType.BulkRenameFailed]: { category: "bulkRename", severity: "warning" },
   [NotificationType.AchievementUnlocked]: { category: "achievements", severity: "success" },
-  [NotificationType.PodcastEpisodePublished]: { category: "podcasts", severity: "success" },
-  [NotificationType.PodcastFeedUnhealthy]: { category: "podcasts", severity: "warning" },
-  [NotificationType.PodcastDownloadFailed]: { category: "podcasts", severity: "error" },
+  [NotificationType.ReadAloudReady]: { category: "readAloud", severity: "success" },
+  [NotificationType.ReadAloudNeedsReview]: { category: "readAloud", severity: "warning" },
+  [NotificationType.ReadAloudFailed]: { category: "readAloud", severity: "error" },
+  [NotificationType.ReadAloudReviewExpiring]: { category: "readAloud", severity: "warning" },
 };
 
 export const NOTIFICATION_CATEGORIES: Record<NotificationCategory, readonly NotificationType[]> = NOTIFICATION_CATEGORY_IDS.reduce(

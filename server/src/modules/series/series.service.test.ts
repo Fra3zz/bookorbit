@@ -225,6 +225,36 @@ describe('SeriesService', () => {
       expect(item.volumesTruncated).toBe(true);
       expect(item.gapCount).toBe(0);
       expect(item.nextBookId).toBe(31);
+      expect(item).toMatchObject({ ownedVolumeCount: 900, readVolumeCount: 0, readingVolumeCount: 0 });
+    });
+
+    it('reports the true volume counts for a series longer than the ladder cap', async () => {
+      seriesRepo.findPage.mockResolvedValue({
+        items: [
+          summaryRow({
+            id: 10,
+            name: 'Hellblazer',
+            bookCount: 300,
+            readCount: 60,
+            members: Array.from({ length: 300 }, (_, i) => ({
+              bookId: 100 + i,
+              seriesIndex: String(i + 1),
+              title: `Issue ${i + 1}`,
+              status: i < 60 ? 'read' : null,
+            })),
+          }),
+        ],
+        total: 1,
+        facets: { ...EMPTY_FACETS, all: 1, inProgress: 1 },
+        page: 0,
+        size: 50,
+      });
+
+      const item = (await service.findAll(reqUser(), {})).items[0]!;
+
+      expect(item.volumes).toHaveLength(60);
+      expect(item.volumesTruncated).toBe(true);
+      expect(item).toMatchObject({ ownedVolumeCount: 300, readVolumeCount: 60, readingVolumeCount: 0 });
     });
 
     it('scopes to specific library when libraryId provided', async () => {
@@ -337,6 +367,35 @@ describe('SeriesService', () => {
       expect(result.seriesInfo.authors).toEqual(['Frank Herbert']);
       expect(result.items).toHaveLength(3);
       expect(result.total).toBe(3);
+    });
+
+    it('reports logical volume counts without changing raw book counts', async () => {
+      seriesRepo.findDetail.mockResolvedValue({
+        id: 42,
+        name: 'Two formats',
+        bookCount: 4,
+        readCount: 2,
+        authors: [],
+        indices: ['1', '1', '2', '2'],
+        expectedBookCount: 3,
+        members: [
+          { seriesIndex: '1', status: null },
+          { seriesIndex: '1', status: 'read' },
+          { seriesIndex: '2', status: 'reading' },
+          { seriesIndex: '2', status: 'read' },
+        ],
+      });
+      seriesRepo.findBookIds.mockResolvedValue({ bookIds: [], total: 4 });
+
+      const result = await service.findBooks(reqUser(), 42, {});
+
+      expect(result.seriesInfo).toMatchObject({
+        bookCount: 4,
+        readCount: 2,
+        ownedVolumeCount: 2,
+        readVolumeCount: 2,
+        possibleGaps: [3],
+      });
     });
 
     it('preserves book order from repository', async () => {
@@ -453,6 +512,8 @@ describe('SeriesService', () => {
       expect(result.seriesInfo.authors).toEqual(['Frank Herbert']);
       expect(result.seriesInfo.possibleGaps).toEqual([]);
       expect(result.seriesInfo.bookCount).toBe(0);
+      expect(result.seriesInfo.ownedVolumeCount).toBe(0);
+      expect(result.seriesInfo.readVolumeCount).toBe(0);
     });
 
     it('throws 404 when series does not exist in any library', async () => {

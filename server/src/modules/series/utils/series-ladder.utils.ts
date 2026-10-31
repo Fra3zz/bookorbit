@@ -1,14 +1,22 @@
 import type { SeriesIndex, SeriesVolumeSlot, SeriesVolumeStatus } from '@bookorbit/types';
 import { SERIES_VOLUME_SLOT_LIMIT } from '@bookorbit/types';
 
-import type { SeriesMemberRow } from '../series.repository';
+import type { SeriesMemberRow, SeriesVolumeMember } from '../series.repository';
 import { computeSeriesGaps, resolveLadderRange } from './series-gaps.utils';
+
+export type SeriesVolumeCounts = {
+  ownedVolumeCount: number;
+  readVolumeCount: number;
+  readingVolumeCount: number;
+};
 
 export type SeriesLadder = {
   volumes: SeriesVolumeSlot[];
   truncated: boolean;
   gaps: number[];
   next: { bookId: number; index: SeriesIndex | null; title: string | null } | null;
+  /** Logical volumes across the whole series, not just the capped slots; null when the members could not all be read. */
+  counts: SeriesVolumeCounts | null;
 };
 
 const STATUS_RANK: Record<SeriesVolumeStatus, number> = { read: 3, reading: 2, unread: 1, missing: 0 };
@@ -23,6 +31,60 @@ function integerIndexOf(value: string | null): number | null {
   if (value === null || !/^\d+$/.test(value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function groupSeriesMembers<T extends SeriesVolumeMember>(params: {
+  members: T[];
+  bookCount: number;
+  expectedBookCount: number | null;
+}): {
+  gaps: number[];
+  range: { from: number; to: number } | undefined;
+  byIndex: Map<number, T>;
+  unnumbered: T[];
+} {
+  const { members, bookCount, expectedBookCount } = params;
+  const indices = members.map((member) => member.seriesIndex).filter((index): index is string => index !== null);
+  const gaps = computeSeriesGaps(indices, bookCount, expectedBookCount);
+  const range = resolveLadderRange(indices, bookCount, expectedBookCount);
+  const byIndex = new Map<number, T>();
+  const unnumbered: T[] = [];
+
+  for (const member of members) {
+    const index = integerIndexOf(member.seriesIndex);
+    if (index === null || !range || index < range.from || index > range.to) {
+      unnumbered.push(member);
+      continue;
+    }
+    const held = byIndex.get(index);
+    if (!held || STATUS_RANK[memberStatus(member.status)] > STATUS_RANK[memberStatus(held.status)]) {
+      byIndex.set(index, member);
+    }
+  }
+
+  return { gaps, range, byIndex, unnumbered };
+}
+
+function tallyVolumes(grouped: { byIndex: ReadonlyMap<number, SeriesVolumeMember>; unnumbered: readonly SeriesVolumeMember[] }): SeriesVolumeCounts {
+  const statuses = [...grouped.byIndex.values(), ...grouped.unnumbered].map((member) => memberStatus(member.status));
+
+  return {
+    ownedVolumeCount: statuses.length,
+    readVolumeCount: statuses.filter((status) => status === 'read').length,
+    readingVolumeCount: statuses.filter((status) => status === 'reading').length,
+  };
+}
+
+/**
+ * Counts logical volumes rather than book records. Numbered copies share one volume and keep the
+ * furthest reading state, while books without a usable whole-numbered position stay independent.
+ */
+export function countSeriesVolumes(params: {
+  members: SeriesVolumeMember[];
+  bookCount: number;
+  expectedBookCount: number | null;
+}): SeriesVolumeCounts {
+  return tallyVolumes(groupSeriesMembers(params));
 }
 
 /**
@@ -42,32 +104,17 @@ export function buildVolumeLadder(params: {
   const { members, bookCount, expectedBookCount } = params;
 
   if (members.length === 0) {
-    return { volumes: [], truncated: params.truncated, gaps: [], next: null };
+    return { volumes: [], truncated: params.truncated, gaps: [], next: null, counts: null };
   }
 
   // A series we could not read in full can still be counted, but naming a volume missing needs
   // every sibling in hand, so a truncated one draws no ladder rather than a wrong one.
   if (params.truncated) {
-    return { volumes: [], truncated: true, gaps: [], next: firstOpenMember(members) };
+    return { volumes: [], truncated: true, gaps: [], next: firstOpenMember(members), counts: null };
   }
 
-  const indices = members.map((m) => m.seriesIndex).filter((idx): idx is string => idx !== null);
-  const gaps = computeSeriesGaps(indices, bookCount, expectedBookCount);
-  const range = resolveLadderRange(indices, bookCount, expectedBookCount);
-
-  const byIndex = new Map<number, SeriesMemberRow>();
-  const unnumbered: SeriesMemberRow[] = [];
-  for (const member of members) {
-    const index = integerIndexOf(member.seriesIndex);
-    if (index === null || !range || index < range.from || index > range.to) {
-      unnumbered.push(member);
-      continue;
-    }
-    const held = byIndex.get(index);
-    if (!held || STATUS_RANK[memberStatus(member.status)] > STATUS_RANK[memberStatus(held.status)]) {
-      byIndex.set(index, member);
-    }
-  }
+  const grouped = groupSeriesMembers({ members, bookCount, expectedBookCount });
+  const { gaps, range, byIndex, unnumbered } = grouped;
 
   const volumes: SeriesVolumeSlot[] = [];
   let truncated = false;
@@ -95,7 +142,7 @@ export function buildVolumeLadder(params: {
     volumes.push({ index: null, bookId: member.bookId, title: member.title, status: memberStatus(member.status) });
   }
 
-  return { volumes, truncated, gaps, next: nextFromSlots(volumes, members) };
+  return { volumes, truncated, gaps, next: nextFromSlots(volumes, members), counts: tallyVolumes(grouped) };
 }
 
 /**

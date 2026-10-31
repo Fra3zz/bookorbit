@@ -111,12 +111,17 @@ package.loaded["bookorbit_catalog_widgets"] = {
         return value
     end,
 }
+package.loaded["ui/widget/textboxwidget"] = {
+    new = function() return { getSize = function() return { w = 100, h = 36 } end, free = function() end } end,
+}
 package.loaded["bookorbit_board_metrics"] = {
     INK = { white = 1, black = 0, g3 = 3, g4 = 4, ge = 5, gb = 6 },
+    face = function() return {} end,
     px = function(value) return value end,
     lh1 = function(value) return value end,
     lh = function(value) return value end,
-    get = function() return { W = 600 } end,
+    get = function() return { W = 600, LW = 600 } end,
+    layoutW = function() return 600 end,
 }
 
 package.path = "koreader-plugin/bookorbit.koplugin/?.lua;" .. package.path
