@@ -33,7 +33,14 @@ RUN case "${TARGETARCH}" in \
     go version -m "/out/${name}"
 
 FROM ${NODE_IMAGE} AS base
-RUN npm install -g pnpm@11.22.0
+# Install exactly the pnpm version the repo declares in "packageManager".
+# If the installed pnpm differs from it, pnpm 11 tries to switch versions and
+# must verify that version's native binary against pnpm-lock.yaml, which fails
+# on platforms missing from the lockfile (e.g. @pnpm/exe.linux-arm64).
+COPY package.json /tmp/package.json
+RUN PNPM_VERSION="$(node -p "require('/tmp/package.json').packageManager.replace(/^pnpm@/, '').split('+')[0]")" && \
+    npm install -g "pnpm@${PNPM_VERSION}" && \
+    rm /tmp/package.json
 
 # Stage 1: Build client
 FROM base AS client-builder
