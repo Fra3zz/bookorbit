@@ -233,7 +233,7 @@ export class CbzService implements OnModuleDestroy {
     }
 
     pages.sort(compareArchiveEntryNames);
-    const value = { pages };
+    const value = { buffer: ab, pages };
     this.rarCache.set(fileId, { stamp, value });
     return value;
   }

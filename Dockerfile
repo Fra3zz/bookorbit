@@ -1,7 +1,47 @@
 ARG NODE_IMAGE=node:26.13.1-alpine3.24@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
 
+# Build kepubify from source so the Go stdlib and Go deps compiled into it stay
+# patched (prebuilt binaries carry whatever Go they were built with, which
+# Trivy flags).
+#  - KEPUBIFY_REF is the same upstream commit the old bundled binaries used.
+#  - golang.org/x/text and x/sync are bumped to latest (upstream pins old,
+#    vulnerable versions).
+#  - GO_MIN_VERSION is a floor: with GOTOOLCHAIN=auto, Go downloads that
+#    toolchain if the image's Go is older (the official image sets
+#    GOTOOLCHAIN=local, and a cached golang:1.27 tag can lag behind).
+#  - The output is named the way KepubifyBinaryService looks it up.
+FROM golang:1.27-alpine AS kepubify-builder
+ARG TARGETARCH
+ARG KEPUBIFY_REF=9546034bc023891af5ce30709de6ae2dcf264628
+ARG GO_MIN_VERSION=1.27.2
+ENV CGO_ENABLED=0 GOTOOLCHAIN=auto
+WORKDIR /build
+RUN case "${TARGETARCH}" in \
+      amd64) name=kepubify-linux-64bit ;; \
+      arm64) name=kepubify-linux-arm64 ;; \
+      arm)   name=kepubify-linux-arm ;; \
+      386)   name=kepubify-linux-32bit ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    go mod init kepubify-build && \
+    go mod edit -go=${GO_MIN_VERSION} && \
+    go get github.com/pgaskin/kepubify/v4/cmd/kepubify@${KEPUBIFY_REF} \
+           golang.org/x/text@latest golang.org/x/sync@latest && \
+    go version && \
+    mkdir -p /out && \
+    go build -trimpath -ldflags="-s -w" -o "/out/${name}" github.com/pgaskin/kepubify/v4/cmd/kepubify && \
+    go version -m "/out/${name}"
+
 FROM ${NODE_IMAGE} AS base
-RUN npm install -g pnpm@11.28.9
+
+# Install exactly the pnpm version the repo declares in "packageManager".
+# If the installed pnpm differs from it, pnpm 11 tries to switch versions and
+# must verify that version's native binary against pnpm-lock.yaml, which fails
+# on platforms missing from the lockfile (e.g. @pnpm/exe.linux-arm64).
+COPY package.json /tmp/package.json
+RUN PNPM_VERSION="$(node -p "require('/tmp/package.json').packageManager.replace(/^pnpm@/, '').split('+')[0]")" && \
+    npm install -g "pnpm@${PNPM_VERSION}" && \
+    rm /tmp/package.json
 
 # Stage 1: Build client
 FROM base AS client-builder
@@ -41,6 +81,9 @@ RUN pnpm --config.verify-deps-before-run=false --filter server run build
 
 # pnpm deploy prunes to prod deps; dist/ is gitignored so copy it in after.
 RUN pnpm --config.allow-unused-patches=true --filter server deploy --prod --legacy /deploy
+# pnpm deploy copies all of server/, including the prebuilt kepubify binaries.
+# Drop them so only the kepubify-builder output ships.
+RUN rm -rf /deploy/bin/kepubify
 RUN cp -r /app/server/dist /deploy/dist
 RUN mkdir -p /deploy/migrations && cp -r /app/server/src/db/migrations/. /deploy/migrations/
 

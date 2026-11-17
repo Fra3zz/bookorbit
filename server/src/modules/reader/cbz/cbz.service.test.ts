@@ -311,6 +311,28 @@ describe('CbzService', () => {
     expect(extract).toHaveBeenCalledWith({ files: ['IMG.jpg'] });
   });
 
+  it('streams a complete CBR base filename before a filename that extends its stem', async () => {
+    const extract = vi.fn(() => ({
+      files: [{ fileHeader: { flags: { directory: false } }, extraction: Uint8Array.from([1]) }],
+    }));
+    bookService.verifyFileAccess.mockResolvedValue({ format: 'cbr', absolutePath: '/books/prefix.cbr' });
+    mockReadFile.mockResolvedValue(Buffer.from('rar-bytes') as unknown as Awaited<ReturnType<typeof readFile>>);
+    mockCreateExtractorFromData
+      .mockResolvedValueOnce({
+        getFileList: () => ({
+          fileHeaders: [
+            { name: 'IMG_0004_Seite_001_1L.jpg', flags: { directory: false } },
+            { name: 'IMG.jpg', flags: { directory: false } },
+          ],
+        }),
+      } as any)
+      .mockResolvedValueOnce({ extract } as any);
+
+    await service.streamPage(25, 0, user);
+
+    expect(extract).toHaveBeenCalledWith({ files: ['IMG.jpg'] });
+  });
+
   it('throws when CBR extraction does not produce the requested file', async () => {
     bookService.verifyFileAccess.mockResolvedValue({ format: 'cbr', absolutePath: '/books/seven.cbr' });
     mockCreateExtractorFromFile
