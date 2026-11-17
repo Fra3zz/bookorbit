@@ -1,5 +1,6 @@
 import { retainFinishedReads } from '../../db/reading-attempt-retention';
 import { deleteLibraryFoldersWithHashInvalidation } from '../../db/book-file-hash-history';
+import { writeKoboTombstones } from '../../db/kobo-entitlement-tombstones';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, getTableColumns, gt, inArray, isNotNull, lte, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -60,29 +61,12 @@ export class LibraryRepository {
       .orderBy(libraries.displayOrder, libraries.name);
   }
 
-  findAllIds() {
-    return this.db.select({ id: libraries.id }).from(libraries).orderBy(libraries.displayOrder, libraries.name);
-  }
-
   findAutoScanSchedules() {
     return this.db
       .select({ id: libraries.id, autoScanCronExpression: libraries.autoScanCronExpression })
       .from(libraries)
       .where(isNotNull(libraries.autoScanCronExpression))
       .orderBy(libraries.id);
-  }
-
-  findAccessibleIdsForUser(userId: number, accessLevels?: readonly AccessLevel[]) {
-    const accessJoin = and(
-      eq(schema.userLibraryAccess.libraryId, libraries.id),
-      eq(schema.userLibraryAccess.userId, userId),
-      accessLevels ? inArray(schema.userLibraryAccess.accessLevel, [...accessLevels]) : undefined,
-    );
-    return this.db
-      .select({ id: libraries.id })
-      .from(libraries)
-      .innerJoin(schema.userLibraryAccess, accessJoin)
-      .orderBy(libraries.displayOrder, libraries.name);
   }
 
   findById(id: number) {
@@ -151,10 +135,28 @@ export class LibraryRepository {
     return this.db.select({ id: books.id }).from(books).where(eq(books.libraryId, libraryId));
   }
 
-  /** The library's books go with it by cascade; their finished reads stay in each reader's history. */
+  /**
+   * The library's books go with it by cascade; their finished reads stay in each reader's history.
+   * A link group left with fewer than two members means "not linked", so it goes too, as it does
+   * when books or folders are deleted.
+   */
   delete(id: number) {
     return this.db.transaction(async (tx) => {
       await retainFinishedReads(tx, eq(books.libraryId, id));
+      await writeKoboTombstones(tx, eq(books.libraryId, id));
+      await tx.execute(sql`
+        delete from ${schema.bookLinkGroups} g
+        where g.id in (
+            select l.group_id from ${schema.bookLinks} l
+            join ${books} b on b.id = l.book_id
+            where b.library_id = ${id}
+          )
+          and (
+            select count(*) from ${schema.bookLinks} l
+            join ${books} b on b.id = l.book_id
+            where l.group_id = g.id and b.library_id <> ${id}
+          ) < 2
+      `);
       await tx.delete(libraries).where(eq(libraries.id, id));
     });
   }
@@ -339,21 +341,6 @@ export class LibraryRepository {
       .where(and(eq(books.libraryId, libraryId), sql`${books.id} = dates.id`, sql`${books.addedAt} = dates.previous_added_at`))
       .returning({ id: books.id });
     return result.map(({ id }) => id);
-  }
-
-  async hasUserAccess(userId: number, libraryId: number): Promise<boolean> {
-    const row = await this.db.query.userLibraryAccess.findFirst({
-      where: and(eq(schema.userLibraryAccess.userId, userId), eq(schema.userLibraryAccess.libraryId, libraryId)),
-    });
-    return row !== undefined;
-  }
-
-  async findUserAccessLevel(userId: number, libraryId: number): Promise<AccessLevel | null> {
-    const row = await this.db.query.userLibraryAccess.findFirst({
-      columns: { accessLevel: true },
-      where: and(eq(schema.userLibraryAccess.userId, userId), eq(schema.userLibraryAccess.libraryId, libraryId)),
-    });
-    return row?.accessLevel ?? null;
   }
 
   getAccess(libraryId: number) {

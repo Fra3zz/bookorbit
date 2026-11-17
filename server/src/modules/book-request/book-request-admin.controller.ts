@@ -61,6 +61,18 @@ export class BookRequestAdminController {
     return this.service.listAll(query, user);
   }
 
+  /** The approver queue's per-view row counts, under the same filters `listAll` takes. */
+  @Get('view-counts')
+  getViewCounts(@Query() query: ListAllBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.getAllViewCounts(query, user);
+  }
+
+  /** Every request the approver queue's filters match, in list order and bounded. */
+  @Get('selection')
+  getSelection(@Query() query: ListAllBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.selectAll(query, user);
+  }
+
   @Get('requesters')
   listRequesters(@Query() query: ListRequesterOptionsDto) {
     return this.service.listRequesterOptions(query);
@@ -162,6 +174,25 @@ export class BookRequestAdminController {
   }
 
   /**
+   * Bulk deletion under the same rules as deleting one row, including which files go with it.
+   * POST rather than DELETE because the selection is a body, and `DELETE :id` never collides.
+   */
+  @Post('delete')
+  @HttpCode(HttpStatus.OK)
+  @Auditable({
+    action: AuditAction.BookRequestDelete,
+    resource: AuditResource.BookRequest,
+    getMeta: (_req, body) => {
+      const result = body as { removed?: unknown[]; failed?: unknown[] } | null;
+      return { deleted: result?.removed?.length ?? 0, failed: result?.failed?.length ?? 0 };
+    },
+    description: 'Deleted a selection of book requests',
+  })
+  removeMany(@Body() dto: BulkBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.removeMany(dto, user);
+  }
+
+  /**
    * The escape hatch for a settled row nobody wants in the history any more. Everyone else gets
    * dismissal, which hides a request without taking the record of it away from the other people
    * who asked for the same book.
@@ -174,8 +205,12 @@ export class BookRequestAdminController {
     getResourceId: (req) => Number(req.params.id),
     description: 'Deleted a book request',
   })
-  remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    return this.service.remove(id, user);
+  remove(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('deleteFiles', new DefaultValuePipe(false), ParseBoolPipe) deleteFiles: boolean,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.service.remove(id, user, deleteFiles);
   }
 
   @Post(':id/fulfill')

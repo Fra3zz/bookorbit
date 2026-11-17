@@ -140,6 +140,26 @@ export const koreaderDeviceRetirements = pgTable(
   (t) => [primaryKey({ columns: [t.userId, t.deviceId] }), index('koreader_device_retirements_user_id_idx').on(t.userId)],
 );
 
+// The name a user gave a device. Kept apart from the model the device reports, because that
+// model is part of how progress rows are keyed and recognised as a device's own.
+export const koreaderDeviceNames = pgTable(
+  'koreader_device_names',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    deviceId: varchar('device_id', { length: 100 }).notNull(),
+    name: varchar('name', { length: 100 }).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .defaultNow()
+      .notNull()
+      .$onUpdateFn(() => new Date()),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.deviceId] })],
+);
+
+export type KoreaderDeviceName = typeof koreaderDeviceNames.$inferSelect;
+
 export type KoreaderDeviceRetirement = typeof koreaderDeviceRetirements.$inferSelect;
 export type NewKoreaderDeviceRetirement = typeof koreaderDeviceRetirements.$inferInsert;
 
@@ -295,6 +315,9 @@ export const koreaderPageStats = pgTable(
   (t) => [
     uniqueIndex('kps_user_file_device_page_start_uidx').on(t.userId, t.bookFileId, t.deviceId, t.page, t.startTime),
     index('kps_user_file_device_start_idx').on(t.userId, t.bookFileId, t.deviceId, t.startTime),
+    // Serves the device-agnostic lookup that decides which device's row owns an event one
+    // device-to-device statistics copy left on several devices.
+    index('kps_user_file_page_start_idx').on(t.userId, t.bookFileId, t.page, t.startTime),
     index('kps_user_id_idx').on(t.userId),
     index('koreader_page_stats_book_file_id_idx').on(t.bookFileId),
     check('koreader_page_stats_duration_nonnegative_chk', sql`${t.durationSeconds} >= 0`),

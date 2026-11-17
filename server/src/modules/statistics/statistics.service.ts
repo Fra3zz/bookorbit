@@ -24,6 +24,9 @@ import type {
   TopSeriesItem,
 } from '@bookorbit/types';
 
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
+import { hiddenLibrariesCacheKey, visibleIdsOrAllForPlace } from '../../common/library-visibility/library-visibility';
+import { principalCacheKey } from '../../common/types/request-user';
 import type { RequestUser } from '../../common/types/request-user';
 import { StatsCache } from '../../common/cache/stats-cache';
 import type { BooksOverTimeQueryDto } from './dto/books-over-time-query.dto';
@@ -80,11 +83,19 @@ const METADATA_COMPLETENESS_FIELDS: MetadataCompletenessFieldDefinition[] = [
 export class StatisticsService {
   private readonly cache = new StatsCache({ ttlMs: STATISTICS_CACHE_TTL_MS, maxEntries: STATISTICS_CACHE_MAX_ENTRIES });
 
-  constructor(private readonly repo: StatisticsRepository) {}
+  constructor(
+    private readonly repo: StatisticsRepository,
+    private readonly libraryScope: LibraryScopeService,
+  ) {}
 
   async getFormatDistribution(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<FormatDistributionItem>> {
     return this.withStatisticsCache('format-distribution', user, query, async () => {
-      const raw = await this.repo.formatDistribution(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const raw = await this.repo.formatDistribution(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const all = raw.flatMap((r) => (r.format ? [{ format: r.format, count: r.count }] : []));
       return { items: this.clipCountsToTopN(all, (count) => ({ format: OTHER_BUCKET_LABEL, count })), unknownCount: 0 };
     });
@@ -92,7 +103,12 @@ export class StatisticsService {
 
   async getLanguageDistribution(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<LanguageDistributionItem>> {
     return this.withStatisticsCache('language-distribution', user, query, async () => {
-      const { items: raw, unknownCount } = await this.repo.languageDistribution(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const { items: raw, unknownCount } = await this.repo.languageDistribution(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const all = raw.flatMap((r) => (r.language ? [{ language: r.language, count: r.count }] : []));
       return { items: this.clipCountsToTopN(all, (count) => ({ language: OTHER_BUCKET_LABEL, count })), unknownCount };
     });
@@ -105,7 +121,7 @@ export class StatisticsService {
       query,
       async () => {
         const items = await this.repo.booksAddedOverTime(
-          user.id,
+          await this.statsLibraryIds(user, query.libraryIds),
           user.isSuperuser,
           user.contentFilters,
           query.libraryIds,
@@ -120,7 +136,12 @@ export class StatisticsService {
 
   async getMetadataScoreDistribution(user: RequestUser, query: StatisticsFilterQueryDto): Promise<MetadataScoreDistribution> {
     return this.withStatisticsCache('metadata-score-distribution', user, query, async () => {
-      const raw = await this.repo.metadataScoreDistribution(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const raw = await this.repo.metadataScoreDistribution(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const byMin = new Map(raw.bins.map((b) => [b.minScore, b.count]));
       const bins = Array.from({ length: METADATA_SCORE_BIN_COUNT }, (_, i) => {
         const minScore = i * 10;
@@ -149,7 +170,12 @@ export class StatisticsService {
     query: StatisticsFilterQueryDto,
   ): Promise<StatisticsResult<LibraryMetadataCompletenessItem>> {
     return this.withStatisticsCache('library-metadata-completeness', user, query, async () => {
-      const rows = await this.repo.libraryMetadataCompleteness(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const rows = await this.repo.libraryMetadataCompleteness(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
 
       const items: LibraryMetadataCompletenessItem[] = rows.flatMap((row) =>
         METADATA_COMPLETENESS_FIELDS.map((f) => {
@@ -172,7 +198,12 @@ export class StatisticsService {
 
   async getFormatShareOverTime(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<FormatShareOverTimeItem>> {
     return this.withStatisticsCache('format-share-over-time', user, query, async () => {
-      const raw = await this.repo.formatShareOverTime(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const raw = await this.repo.formatShareOverTime(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const totals = new Map<string, number>();
       for (const row of raw) {
         const format = this.normalizeFormatLabel(row.format);
@@ -207,7 +238,7 @@ export class StatisticsService {
   async getPageCountDistribution(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<PageCountDistributionItem>> {
     return this.withStatisticsCache('page-count-distribution', user, query, async () => {
       const { items: raw, unknownCount } = await this.repo.pageCountDistributionByFormat(
-        user.id,
+        await this.statsLibraryIds(user, query.libraryIds),
         user.isSuperuser,
         user.contentFilters,
         query.libraryIds,
@@ -233,7 +264,12 @@ export class StatisticsService {
 
   async getStorageByFormat(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<StorageByFormatItem>> {
     return this.withStatisticsCache('storage-by-format', user, query, async () => {
-      const raw = await this.repo.storageByFormat(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const raw = await this.repo.storageByFormat(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const all = raw.flatMap((r) => (r.format ? [{ format: r.format, sizeBytes: Number(r.sizeBytes) }] : []));
       return { items: this.clipStorageToTopN(all), unknownCount: 0 };
     });
@@ -241,21 +277,36 @@ export class StatisticsService {
 
   async getPublicationDecade(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<PublicationDecadeItem>> {
     return this.withStatisticsCache('publication-decade', user, query, async () => {
-      const { items, unknownCount } = await this.repo.publicationDecade(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const { items, unknownCount } = await this.repo.publicationDecade(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       return { items, unknownCount };
     });
   }
 
   async getPublicationYearTimeline(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<PublicationYearPoint>> {
     return this.withStatisticsCache('publication-year-timeline', user, query, async () => {
-      const { items, unknownCount } = await this.repo.publicationYearTimeline(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const { items, unknownCount } = await this.repo.publicationYearTimeline(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       return { items, unknownCount };
     });
   }
 
   async getTopAuthors(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<TopAuthorItem>> {
     return this.withStatisticsCache('top-authors', user, query, async () => {
-      const raw = await this.repo.topAuthors(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const raw = await this.repo.topAuthors(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const items = raw.slice(0, TOP_LIST_LIMIT).map((r) => ({ name: r.name, count: r.count }));
       return { items, unknownCount: 0 };
     });
@@ -263,7 +314,12 @@ export class StatisticsService {
 
   async getMetadataCompleteness(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<MetadataCompletenessItem>> {
     return this.withStatisticsCache('metadata-completeness', user, query, async () => {
-      const row = await this.repo.metadataCompleteness(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const row = await this.repo.metadataCompleteness(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const total = row?.total ?? 0;
       const items = METADATA_COMPLETENESS_FIELDS.filter((fieldDef) => fieldDef.includeInOverall)
         .map((fieldDef) => ({ field: fieldDef.field, presentCount: row?.[fieldDef.key] ?? 0, totalCount: total }))
@@ -274,7 +330,12 @@ export class StatisticsService {
 
   async getGenreDistribution(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<GenreDistributionItem>> {
     return this.withStatisticsCache('genre-distribution', user, query, async () => {
-      const { items: raw, unknownCount } = await this.repo.genreDistribution(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const { items: raw, unknownCount } = await this.repo.genreDistribution(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const items = raw.slice(0, TOP_LIST_LIMIT).map((r) => ({ genre: r.genre, count: r.count }));
       return { items, unknownCount };
     });
@@ -282,7 +343,12 @@ export class StatisticsService {
 
   async getMetadataFreshnessGauge(user: RequestUser, query: StatisticsFilterQueryDto): Promise<MetadataFreshnessGauge> {
     return this.withStatisticsCache('metadata-freshness-gauge', user, query, async () => {
-      const row = await this.repo.metadataFreshnessGauge(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const row = await this.repo.metadataFreshnessGauge(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const totalBooks = row.totalBooks ?? 0;
       const fresh30dCount = row.fresh30dCount ?? 0;
       const stale31To90dCount = row.stale31To90dCount ?? 0;
@@ -307,7 +373,12 @@ export class StatisticsService {
 
   async getLibraryIntegrityGauge(user: RequestUser, query: StatisticsFilterQueryDto): Promise<LibraryIntegrityGauge> {
     return this.withStatisticsCache('library-integrity-gauge', user, query, async () => {
-      const row = await this.repo.libraryIntegrityGauge(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const row = await this.repo.libraryIntegrityGauge(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const totalBooks = row.totalBooks ?? 0;
       const presentCount = row.presentCount ?? 0;
       const primaryFileCount = row.primaryFileCount ?? 0;
@@ -330,7 +401,12 @@ export class StatisticsService {
 
   async getAcquisitionLagScatter(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<AcquisitionLagPoint>> {
     return this.withStatisticsCache('acquisition-lag-scatter', user, query, async () => {
-      const { items, unknownCount } = await this.repo.acquisitionLagScatter(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const { items, unknownCount } = await this.repo.acquisitionLagScatter(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       return { items, unknownCount };
     });
   }
@@ -354,20 +430,25 @@ export class StatisticsService {
   }
 
   async getSummary(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsSummary> {
-    return this.withStatisticsCache('summary', user, query, () =>
-      this.repo.getSummary(user.id, user.isSuperuser, user.contentFilters, query.libraryIds),
+    return this.withStatisticsCache('summary', user, query, async () =>
+      this.repo.getSummary(await this.statsLibraryIds(user, query.libraryIds), user.isSuperuser, user.contentFilters, query.libraryIds),
     );
   }
 
   async getGenreCooccurrence(user: RequestUser, query: StatisticsFilterQueryDto): Promise<ChordDiagramData> {
-    return this.withStatisticsCache('genre-cooccurrence', user, query, () =>
-      this.repo.getGenreCooccurrence(user.id, user.isSuperuser, user.contentFilters, query.libraryIds),
+    return this.withStatisticsCache('genre-cooccurrence', user, query, async () =>
+      this.repo.getGenreCooccurrence(await this.statsLibraryIds(user, query.libraryIds), user.isSuperuser, user.contentFilters, query.libraryIds),
     );
   }
 
   async getLargestBooks(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<LargestBookItem>> {
     return this.withStatisticsCache('largest-books', user, query, async () => {
-      const raw = await this.repo.largestBooks(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const raw = await this.repo.largestBooks(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const items = raw.flatMap((r) => (r.title && r.format ? [{ id: r.id, title: r.title, sizeBytes: Number(r.sizeBytes), format: r.format }] : []));
       return { items, unknownCount: 0 };
     });
@@ -375,10 +456,19 @@ export class StatisticsService {
 
   async getTopSeries(user: RequestUser, query: StatisticsFilterQueryDto): Promise<StatisticsResult<TopSeriesItem>> {
     return this.withStatisticsCache('top-series', user, query, async () => {
-      const raw = await this.repo.topSeries(user.id, user.isSuperuser, user.contentFilters, query.libraryIds);
+      const raw = await this.repo.topSeries(
+        await this.statsLibraryIds(user, query.libraryIds),
+        user.isSuperuser,
+        user.contentFilters,
+        query.libraryIds,
+      );
       const items = raw.flatMap((r) => (r.name ? [{ name: r.name, count: r.count }] : []));
       return { items, unknownCount: 0 };
     });
+  }
+
+  private statsLibraryIds(user: RequestUser, requestedLibraryIds?: number[]): Promise<number[] | null> {
+    return visibleIdsOrAllForPlace(this.libraryScope, user, 'stats', requestedLibraryIds);
   }
 
   private withStatisticsCache<T>(
@@ -389,7 +479,7 @@ export class StatisticsService {
     extraScope: Record<string, string | number | boolean> = {},
   ): Promise<T> {
     const key = this.buildCacheKey(endpoint, user, query.libraryIds, extraScope);
-    return this.cache.get(String(user.id), key, load);
+    return this.cache.get(String(user.id), principalCacheKey(user, key), load);
   }
 
   private buildCacheKey(
@@ -403,6 +493,7 @@ export class StatisticsService {
       endpoint,
       isSuperuser: user.isSuperuser,
       libraryIds: normalizedLibraries,
+      hiddenLibraryIds: hiddenLibrariesCacheKey(user, 'stats'),
       contentFilters: this.normalizeContentFilters(user.contentFilters),
       ...extraScope,
     });

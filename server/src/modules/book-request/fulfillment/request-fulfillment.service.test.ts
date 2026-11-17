@@ -42,6 +42,7 @@ function joined(overrides: Partial<BookRequestRow> = {}) {
     requesterUsername: 'bob',
     requesterName: 'Bob',
     decidedByUsername: null,
+    decidedByName: null,
     targetLibraryName: 'Books',
   };
 }
@@ -81,7 +82,7 @@ function makeService(
     ...overrides.clients,
   };
   const adapter = { add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH }) };
-  const registry = { require: vi.fn().mockReturnValue(adapter) };
+  const registry = { find: vi.fn().mockReturnValue(undefined), require: vi.fn().mockReturnValue(adapter) };
   const direct = { add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH }) };
   const indexers = {
     resolveConfig: vi.fn().mockResolvedValue({ id: 9, name: 'tracker', adapterType: 'torznab' }),
@@ -328,6 +329,25 @@ describe('RequestFulfillmentService.grab', () => {
 
     await expect(service.grab(7, { downloadClientId: 4, magnet: MAGNET }, user())).rejects.toThrow(BadRequestException);
     expect(downloads.create).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A client that stages its own files lands them under a root BookOrbit owns, so it has no import
+   * root to declare and is saved without mappings by design. The rule that lets it be saved without
+   * one has to let it grab without one too, or the saved config can never be used.
+   */
+  it('grabs through a staging client that has no path mapping', async () => {
+    const { service, downloads, registry } = makeService({
+      clients: {
+        findOne: vi.fn().mockResolvedValue({ id: 4, name: 'torbox', adapterType: 'torbox', enabled: true, pathMappings: [] }),
+        resolveConfig: vi.fn().mockResolvedValue({ id: 4, adapterType: 'torbox' }),
+      },
+    });
+    registry.find.mockReturnValue({ stage: vi.fn() });
+
+    await service.grab(7, { downloadClientId: 4, magnet: MAGNET }, user());
+
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ downloadClientId: 4 }));
   });
 
   it('404s an unknown request', async () => {
@@ -1191,6 +1211,23 @@ describe('RequestFulfillmentService.failDownload', () => {
       NotificationType.BookRequestFailed,
       expect.objectContaining({ meta: { requestId: 7, downloadId: 11 } }),
     );
+  });
+
+  /** The prose is still written, so a client that does not know the code keeps showing it. */
+  it('records a classified failure with its code and parameters beside the reason', async () => {
+    const { service, requests } = makeService();
+
+    await service.failDownload({ id: 11, requestId: 7 } as BookRequestDownloadRow, 'The downloaded content is not readable at /data/torrents/Dune', {
+      code: 'DOWNLOAD_UNREADABLE',
+      meta: { path: '/data/torrents/Dune' },
+    });
+
+    expect(requests.updateIf).toHaveBeenCalledWith(7, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, {
+      status: 'failed',
+      statusReason: 'The downloaded content is not readable at /data/torrents/Dune',
+      failureCode: 'DOWNLOAD_UNREADABLE',
+      failureMeta: { path: '/data/torrents/Dune' },
+    });
   });
 
   it('drops a direct source URL when its attempt fails', async () => {

@@ -2,6 +2,7 @@ import * as fs from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { crc32, deflateRawSync, inflateRawSync } from 'zlib';
+import { Logger } from '@nestjs/common';
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipReader, ZipWriter, type ZipWriterConstructorOptions } from '@zip.js/zip.js';
 import * as unzipper from 'unzipper';
 import { patch } from './epub-zip-patcher';
@@ -155,37 +156,68 @@ describe('raw EPUB ZIP rewrite', () => {
     await expect(after.files.find((entry) => entry.path === name)!.buffer()).resolves.toEqual(contents.get(name));
   });
 
+  it.each(['local signature', 'overlap', 'duplicate name', 'duplicate offset', 'truncated directory'])(
+    'keeps the original intact for %s corruption',
+    async (kind) => {
+      const original = await fixture({ dataDescriptor: false });
+      const records = centralRecords(original);
+      const before = await snapshot(original);
+      const chapterOffset = before.entries.get('OPS/chapter.xhtml')!.offset;
+      if (kind === 'local signature') original.writeUInt32LE(0, chapterOffset);
+      if (kind === 'overlap') original.writeUInt32LE(original.length, records[4]! + 20);
+      if (kind === 'duplicate name') {
+        const first = records[2]!;
+        const second = records[3]!;
+        const name = original.subarray(first + 46, first + 46 + original.readUInt16LE(first + 28));
+        expect(name.length).toBe(original.readUInt16LE(second + 28));
+        name.copy(original, second + 46);
+      }
+      if (kind === 'duplicate offset') original.writeUInt32LE(original.readUInt32LE(records[2]! + 42), records[3]! + 42);
+      const input = kind === 'truncated directory' ? original.subarray(0, original.length - 10) : original;
+      await fs.writeFile(filePath, input);
+      await expect(patch(filePath, new Map([['OPS/content.opf', Buffer.from('updated')]]))).rejects.toThrow();
+      await expect(fs.readFile(filePath)).resolves.toEqual(input);
+      expect(await fs.readdir(root)).toEqual(['book.epub']);
+    },
+  );
+
   it.each([
-    'local signature',
-    'local filename',
-    'local compression',
-    'local flags',
-    'overlap',
-    'duplicate name',
-    'duplicate offset',
-    'truncated directory',
-  ])('keeps the original intact for %s corruption', async (kind) => {
+    { kind: 'filename', reason: 'mismatched local file header (filename)' },
+    { kind: 'compression method', reason: 'mismatched local file header (compression method)' },
+    { kind: 'general purpose flags', reason: 'mismatched local file header (general purpose bit flag)' },
+  ])('rewrites every entry when a local header disagrees about its $kind', async ({ kind, reason }) => {
     const original = await fixture({ dataDescriptor: false });
-    const records = centralRecords(original);
-    const before = await snapshot(original);
-    const chapterOffset = before.entries.get('OPS/chapter.xhtml')!.offset;
-    if (kind === 'local signature') original.writeUInt32LE(0, chapterOffset);
-    if (kind === 'local filename') original[chapterOffset + 30] = 0x2e;
-    if (kind === 'local compression') original.writeUInt16LE(0, chapterOffset + 8);
-    if (kind === 'local flags') original.writeUInt16LE(1, chapterOffset + 6);
-    if (kind === 'overlap') original.writeUInt32LE(original.length, records[4]! + 20);
-    if (kind === 'duplicate name') {
-      const first = records[2]!;
-      const second = records[3]!;
-      const name = original.subarray(first + 46, first + 46 + original.readUInt16LE(first + 28));
-      expect(name.length).toBe(original.readUInt16LE(second + 28));
-      name.copy(original, second + 46);
+    const chapterOffset = (await snapshot(original)).entries.get('OPS/chapter.xhtml')!.offset;
+    if (kind === 'filename') original[chapterOffset + 30] = 0x2e;
+    if (kind === 'compression method') original.writeUInt16LE(0, chapterOffset + 8);
+    if (kind === 'general purpose flags') original.writeUInt16LE(1, chapterOffset + 6);
+    await fs.writeFile(filePath, original);
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    const newOpf = Buffer.from('<package><title>Updated title</title></package>');
+    const cover = Buffer.from('new cover image bytes');
+
+    await patch(
+      filePath,
+      new Map([
+        ['OPS/content.opf', newOpf],
+        ['OPS/images/new-cover.jpg', cover],
+      ]),
+    );
+
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]![0]).toContain(`[epub_zip.rewrite] [fail]`);
+    expect(warn.mock.calls[0]![0]).toContain(`reason="${reason}"`);
+    const rewritten = await unzipper.Open.file(filePath);
+    const decoded = new Map(rewritten.files.map((entry) => [entry.path, entry]));
+    expect(rewritten.files[0]!.path).toBe('mimetype');
+    expect(rewritten.files[0]!.compressionMethod).toBe(0);
+    expect(decoded.size).toBe(contents.size + 1);
+    for (const [name, content] of contents) {
+      if (name === 'mimetype') continue;
+      const expected = name === 'OPS/content.opf' ? newOpf : content;
+      await expect(decoded.get(name)!.buffer()).resolves.toEqual(expected);
     }
-    if (kind === 'duplicate offset') original.writeUInt32LE(original.readUInt32LE(records[2]! + 42), records[3]! + 42);
-    const input = kind === 'truncated directory' ? original.subarray(0, original.length - 10) : original;
-    await fs.writeFile(filePath, input);
-    await expect(patch(filePath, new Map([['OPS/content.opf', Buffer.from('updated')]]))).rejects.toThrow();
-    await expect(fs.readFile(filePath)).resolves.toEqual(input);
+    await expect(decoded.get('OPS/images/new-cover.jpg')!.buffer()).resolves.toEqual(cover);
     expect(await fs.readdir(root)).toEqual(['book.epub']);
   });
 
@@ -205,6 +237,33 @@ describe('raw EPUB ZIP rewrite', () => {
     await fs.writeFile(tmpPath, 'user-owned');
     await expect(rewriteEpubZip(filePath, tmpPath, new Map())).rejects.toMatchObject({ code: 'EEXIST' });
     await expect(fs.readFile(tmpPath, 'utf8')).resolves.toBe('user-owned');
+  });
+
+  it('leaves out removed entries and copies every other record untouched', async () => {
+    const original = await fixture();
+    await fs.writeFile(filePath, original);
+    const before = await snapshot(original);
+
+    await patch(filePath, new Map([['OPS/content.opf', Buffer.from('<package>new</package>')]]), new Set(['OPS/images/stored.jpg', 'OPS/not-there']));
+
+    const after = await snapshot(await fs.readFile(filePath));
+    expect([...after.entries.keys()]).not.toContain('OPS/images/stored.jpg');
+    expect(after.entries.size).toBe(contents.size - 1);
+    for (const name of contents.keys()) {
+      if (name === 'OPS/images/stored.jpg' || name === 'OPS/content.opf' || name === 'mimetype') continue;
+      expect(after.records.get(name), name).toEqual(before.records.get(name));
+    }
+    const independent = await unzipper.Open.file(filePath);
+    expect(independent.files[0]!.path).toBe('mimetype');
+  });
+
+  it('refuses to remove the mimetype', async () => {
+    const original = await fixture();
+    await fs.writeFile(filePath, original);
+
+    await expect(patch(filePath, new Map(), new Set(['mimetype']))).rejects.toThrow('removal path');
+    await expect(fs.readFile(filePath)).resolves.toEqual(original);
+    expect(await fs.readdir(root)).toEqual(['book.epub']);
   });
 
   it.each(['read', 'write', 'sync', 'zero read', 'zero write', 'changed source', 'source close', 'output close'])(

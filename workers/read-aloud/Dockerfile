@@ -1,6 +1,6 @@
 # Debian trixie for ffmpeg 7: STAlign's audiobook probe passes `ffprobe -output_format`, which the
 # ffmpeg 5.1 in bookworm rejects, failing every job in its first stage.
-ARG NODE_IMAGE=node:26.12.1-trixie-slim
+ARG NODE_IMAGE=node:26.13.1-trixie-slim
 
 FROM ${NODE_IMAGE} AS builder
 WORKDIR /app
@@ -39,9 +39,12 @@ RUN cd /deploy && \
 
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
+# The worker never runs npm, and the npm bundled with the base image carries its own copies of
+# packages such as undici and brace-expansion that the workspace overrides cannot reach.
 RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends ca-certificates ffmpeg tini && \
-    rm -rf /var/lib/apt/lists/* && \
+    rm -rf /var/lib/apt/lists/* /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx && \
     mkdir -p /data/read-aloud/jobs /data/read-aloud/tmp /data/read-aloud/ghost-story && \
     chown -R node:node /data
 
@@ -66,3 +69,11 @@ ENV APP_VERSION=${APP_VERSION}
 USER node
 EXPOSE 8787
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
+
+LABEL org.opencontainers.image.title="BookOrbit Read-Aloud Worker" \
+      org.opencontainers.image.description="Read-aloud EPUB generation worker for BookOrbit" \
+      org.opencontainers.image.url="https://bookorbit.app" \
+      org.opencontainers.image.documentation="https://github.com/bookorbit/bookorbit/blob/main/docs/READ_ALOUD.md" \
+      org.opencontainers.image.source="https://github.com/bookorbit/bookorbit" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.version="${APP_VERSION:-dev}"

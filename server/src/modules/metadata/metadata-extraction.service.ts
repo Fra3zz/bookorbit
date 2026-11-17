@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import type { BookIsbnCandidates, CoverMedium } from '@bookorbit/types';
 import { DjvuDocumentService } from '../djvu/djvu-document.service';
 
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
@@ -12,9 +13,15 @@ import { MobiFormatExtractor } from './extractors/mobi-format.extractor';
 import { OpfFormatExtractor } from './extractors/opf-format.extractor';
 import { PdfFormatExtractor } from './extractors/pdf-format.extractor';
 import { extractCover } from './lib/cover';
-import { extractEpubFixedLayout } from './lib/epub';
+import { extractEpubAudioCover } from './lib/cover-epub';
+import { extractEpubFixedLayout, readEpubIsbnHits } from './lib/epub';
+import { readFb2IsbnHits } from './lib/fb2-parser';
 import { parseBookFilename } from './lib/filename-parser';
+import { type IsbnHit, toIsbnCandidates } from './lib/isbn-detect';
+import { readMobiIsbnHits } from './lib/mobi-parser';
+import { readPdfIsbnHits } from './lib/pdf-isbn-scan';
 import type { PdfParseWarning } from './lib/pdf-parser';
+import { extractPopplerPdfMetadata } from './lib/pdf-poppler-metadata';
 
 export const METADATA_AUDIO_FORMATS = ['m4b', 'mp3', 'm4a', 'opus', 'ogg', 'flac'] as const;
 
@@ -99,12 +106,45 @@ export class MetadataExtractionService {
     return { metadata: null, cover };
   }
 
-  /** Reads only a file's embedded cover. KEPUB is an EPUB container, and audio art comes from ffmpeg. */
-  async extractEmbeddedCover(absolutePath: string, format: string): Promise<Buffer | null> {
+  /**
+   * Reads only a file's embedded cover. KEPUB is an EPUB container, and audio art comes from
+   * ffmpeg. An EPUB's audio medium is its declared audiobook cover, not its book cover.
+   */
+  async extractEmbeddedCover(absolutePath: string, format: string, medium?: CoverMedium): Promise<Buffer | null> {
     const normalized = format.toLowerCase();
+    if (medium === 'audio' && normalized === 'epub') return extractEpubAudioCover(absolutePath);
     if (normalized === 'djvu') return this.djvu.extractCover(absolutePath);
     if ((METADATA_AUDIO_FORMATS as readonly string[]).includes(normalized)) return extractAudioCover(absolutePath);
     return extractCover(absolutePath, normalized === 'kepub' ? 'epub' : normalized);
+  }
+
+  /** The ISBNs printed in a file's front and back pages, for a person to choose between. */
+  async findIsbnCandidates(absolutePath: string, format: string): Promise<BookIsbnCandidates> {
+    const hits = await this.readContentIsbnHits(absolutePath, format.toLowerCase());
+    return { readable: hits !== null, candidates: hits ? toIsbnCandidates(hits) : [] };
+  }
+
+  private async readContentIsbnHits(absolutePath: string, format: string): Promise<IsbnHit[] | null> {
+    switch (format) {
+      case 'epub':
+      case 'kepub':
+        return readEpubIsbnHits(absolutePath);
+      case 'mobi':
+      case 'azw3':
+      case 'azw':
+        return readMobiIsbnHits(absolutePath);
+      case 'fb2':
+        return readFb2IsbnHits(absolutePath);
+      case 'pdf': {
+        const pageCount = await extractPopplerPdfMetadata(absolutePath).then(
+          (info) => info?.pageCount ?? null,
+          () => null,
+        );
+        return readPdfIsbnHits(absolutePath, pageCount);
+      }
+      default:
+        return null;
+    }
   }
 
   private logPdfParseWarning(warning: PdfParseWarning): void {

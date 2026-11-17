@@ -1,12 +1,12 @@
 import { Module, forwardRef } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtModule } from '@nestjs/jwt';
-import type { StringValue } from 'ms';
 
 import { AppSettingsModule } from '../app-settings/app-settings.module';
+import { AuditModule } from '../audit/audit.module';
 import { AuthModule } from '../auth/auth.module';
 import { BookModule } from '../book/book.module';
 import { BookCoverStoreModule } from '../book-cover-store/book-cover-store.module';
+import { BulkRunsModule } from '../bulk-runs/bulk-runs.module';
+import { JobsModule } from '../jobs/jobs.module';
 import { LibraryModule } from '../library/library.module';
 import { MetadataModule } from '../metadata/metadata.module';
 import { MetadataCacheModule } from '../metadata-cache/metadata-cache.module';
@@ -17,8 +17,10 @@ import { AuthorPhotoFlagBackfillService } from './author-photo-flag-backfill.ser
 import { AuthorEnrichmentConfigService } from './author-enrichment-config.service';
 import { AuthorEnrichmentExecutorService } from './author-enrichment-executor.service';
 import { AuthorEnrichmentGateway } from './author-enrichment.gateway';
+import { AuthorEnrichmentJobSource } from './author-enrichment-job-source';
 import { AuthorEnrichmentOrchestratorService } from './author-enrichment-orchestrator.service';
 import { AuthorEnrichmentRepository } from './author-enrichment.repository';
+import { AuthorBulkRefreshHandler } from './author-bulk-refresh.handler';
 import { AuthorsController } from './authors.controller';
 import { AuthorMetadataFetchService } from './metadata/author-metadata-fetch.service';
 import { AUTHOR_METADATA_PROVIDERS } from './metadata/constants';
@@ -47,13 +49,9 @@ const AUTHOR_PROVIDER_CLASSES = [AudnexusAuthorMetadataProvider, GoodreadsAuthor
     MetadataScoreModule,
     forwardRef(() => NotificationModule),
     AuthModule,
-    JwtModule.registerAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        secret: config.getOrThrow<string>('auth.jwtSecret'),
-        signOptions: { expiresIn: config.getOrThrow<StringValue | number>('auth.jwtExpiresIn') },
-      }),
-    }),
+    AuditModule,
+    JobsModule,
+    BulkRunsModule,
   ],
   controllers: [AuthorsController],
   providers: [
@@ -73,10 +71,12 @@ const AUTHOR_PROVIDER_CLASSES = [AudnexusAuthorMetadataProvider, GoodreadsAuthor
     AuthorEnrichmentGateway,
     AuthorEnrichmentExecutorService,
     AuthorEnrichmentOrchestratorService,
+    AuthorEnrichmentJobSource,
     AuthorEnrichmentRepository,
     AuthorsService,
     AuthorsRepository,
     AuthorPhotoFlagBackfillService,
+    AuthorBulkRefreshHandler,
   ],
   exports: [AuthorsService, AuthorsRepository, AuthorImageStorageService, AuthorEnrichmentOrchestratorService, AuthorMetadataPreferencesService],
 })

@@ -4,7 +4,9 @@ export enum Permission {
   LibraryUpload = "library_upload",
   LibraryEditMetadata = "library_edit_metadata",
   LibraryDeleteBooks = "library_delete_books",
+  LibraryMergeBooks = "library_merge_books",
   LibraryGenerateReadAloud = "library_generate_read_aloud",
+  LibraryGenerateStoryGuide = "library_generate_story_guide",
   BookDockAccess = "book_dock_access",
   BookRequestAccess = "book_request_access",
   DemoRestricted = "demo_restricted",
@@ -16,6 +18,7 @@ export enum Permission {
   ReadwiseSync = "readwise_sync",
   StorygraphSync = "storygraph_sync",
   OpdsAccess = "opds_access",
+  ApiKeys = "api_keys",
 
   // Email
   EmailSend = "email_send",
@@ -43,8 +46,10 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   [Permission.LibraryUpload]: "Upload books",
   [Permission.LibraryEditMetadata]: "Edit metadata",
   [Permission.LibraryDeleteBooks]: "Delete books",
+  [Permission.LibraryMergeBooks]: "Merge and link books",
   [Permission.LibraryGenerateReadAloud]: "Generate read-aloud books",
-  [Permission.BookDockAccess]: "Book Dock",
+  [Permission.LibraryGenerateStoryGuide]: "Build story guides",
+  [Permission.BookDockAccess]: "Library Dock",
   [Permission.BookRequestAccess]: "Request books",
   [Permission.DemoRestricted]: "Demo restricted",
   [Permission.KoboSync]: "Kobo sync",
@@ -53,13 +58,14 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   [Permission.ReadwiseSync]: "Readwise sync",
   [Permission.StorygraphSync]: "StoryGraph sync",
   [Permission.OpdsAccess]: "OPDS access",
+  [Permission.ApiKeys]: "Create API keys",
   [Permission.EmailSend]: "Send by email",
   [Permission.ManageEmail]: "Manage email",
   [Permission.ManageLibraries]: "Manage libraries",
   [Permission.ManageMetadataConfig]: "Metadata config",
   [Permission.ManageIcons]: "Manage icons",
   [Permission.ManageAppSettings]: "App settings",
-  [Permission.ManageBookDock]: "Manage Book Dock",
+  [Permission.ManageBookDock]: "Manage Library Dock",
   [Permission.ManageBookRequests]: "Manage book requests",
   [Permission.BookRequestAutoApprove]: "Auto-approve requests",
   [Permission.BookRequestSelfFulfill]: "Download books directly",
@@ -68,6 +74,12 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   [Permission.ViewAuditLog]: "View audit log",
   [Permission.NotificationAccess]: "Notifications",
 };
+
+/**
+ * Permissions that take something away rather than grant it. An API key keeps every one its owner
+ * holds, whatever the key was granted: intersecting them away would let a key escape a restriction.
+ */
+export const RESTRICTIVE_PERMISSIONS: readonly Permission[] = [Permission.DemoRestricted];
 
 /**
  * Permissions that are inert without another one, and the dependency is enforced when permissions
@@ -79,6 +91,8 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
  */
 export const PERMISSION_REQUIRES: Partial<Record<Permission, readonly Permission[]>> = {
   [Permission.LibraryGenerateReadAloud]: [Permission.LibraryUpload],
+  // A merge rewrites the kept book's metadata from the others, so it is metadata editing first.
+  [Permission.LibraryMergeBooks]: [Permission.LibraryEditMetadata],
   // Self-fulfilment adds a way to fulfil a request. Listing, viewing and the live queue all
   // answer to `BookRequestAccess`, so granting one without the other buys nothing at all.
   [Permission.BookRequestSelfFulfill]: [Permission.BookRequestAccess],

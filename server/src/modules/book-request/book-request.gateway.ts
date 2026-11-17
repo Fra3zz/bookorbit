@@ -1,14 +1,14 @@
 import { Logger, UnauthorizedException } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Permission, type AuthenticationMethod } from '@bookorbit/types';
+import { Permission } from '@bookorbit/types';
 import type { BookRequestProgressEvent } from '@bookorbit/types';
 
-import { AuthService } from '../auth/auth.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
 import { wsCorsOrigin } from '../../common/utils/ws-cors.utils';
+import { AuthenticatorService } from '../auth/authenticator.service';
+import { JobChangesService } from '../jobs/job-changes.service';
 
 /** Everybody who reaches every request over HTTP, and therefore every request's progress. */
 const MANAGERS_ROOM = 'book-requests:managers';
@@ -35,19 +35,13 @@ export class BookRequestGateway implements OnGatewayConnection, OnGatewayDisconn
   private changes = 0;
 
   constructor(
-    private readonly jwtService: JwtService,
-    private readonly authService: AuthService,
+    private readonly authenticator: AuthenticatorService,
+    private readonly jobChanges: JobChangesService,
   ) {}
 
   async handleConnection(client: Socket): Promise<void> {
     try {
-      const token = client.handshake.auth?.token as string | undefined;
-      if (!token) throw new UnauthorizedException('No token provided');
-      const payload = this.jwtService.verify<{ sub: number; ver: number; sid?: number; amr?: AuthenticationMethod }>(token, {
-        algorithms: ['HS256'],
-      });
-      const user = await this.authService.validateSessionUser(payload.sub, payload.ver, payload.amr ?? 'legacy', payload.sid);
-      if (!user) throw new UnauthorizedException('User not found or token revoked');
+      const user = await this.authenticator.authenticateSocket(client);
       if (!user.isSuperuser && !user.permissions.includes(Permission.BookRequestAccess)) {
         throw new UnauthorizedException('Missing book request access');
       }
@@ -79,17 +73,28 @@ export class BookRequestGateway implements OnGatewayConnection, OnGatewayDisconn
     return this.changes;
   }
 
+  /** Also a state change for the Jobs area: nearly every one is a download moving, and the rest only cost a refetch. */
   emitChanged(): void {
     this.changes++;
     this.server?.emit('book-requests:changed');
+    this.jobChanges.notify({ type: 'request-download', ownerId: null, state: true });
   }
 
   /**
    * `viewerUserIds` is the requester plus the subscribers; the managers room is added here so no
    * caller has to resolve who those are. Socket.IO delivers once per socket however many of the
    * named rooms it is in.
+   *
+   * `statusChanged` marks a tick that moved the attempt to another status, which the Jobs area
+   * hears as a state change. Other ticks reach it as progress for each viewer, the driver among
+   * them, since taking a request on subscribes the fulfiller to it.
    */
-  emitProgress(event: BookRequestProgressEvent, viewerUserIds: readonly number[]): void {
+  emitProgress(event: BookRequestProgressEvent, viewerUserIds: readonly number[], statusChanged = false): void {
     this.server?.to([MANAGERS_ROOM, ...viewerUserIds.map(userRoom)]).emit('book-requests:progress', event);
+    if (statusChanged) {
+      this.jobChanges.notify({ type: 'request-download', ownerId: null, state: true });
+      return;
+    }
+    for (const ownerId of viewerUserIds) this.jobChanges.notify({ type: 'request-download', ownerId, state: false });
   }
 }

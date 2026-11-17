@@ -2,15 +2,18 @@ import type { RegexMetadataFields } from '@bookorbit/types';
 import { decideRegexFields, mergeRegexMetadata } from './regex/merge-regex-metadata';
 import { stat } from 'fs/promises';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import { and, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import sharp from 'sharp';
 
+import { audioToolsConfig } from '../../config/config';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { isFileDerivedChapterSource } from '../../common/utils/audiobook-chapters.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { inNameOrder } from '../../common/utils/insert-lock-order.utils';
 import { isKnownPlaceholderCover } from '../../common/utils/placeholder-cover.utils';
 import {
   chooseCanonicalMetadataTextRow,
@@ -40,7 +43,7 @@ import {
   MIN_COVER_SHORT_SIDE_PX,
 } from '@bookorbit/types';
 import { chaptersReachLastFile, mergeAudioChapters, type AudioChapterSource } from './extractors/audio-chapter-merge';
-import { parseAudioDuration, probeAudioChapters } from './extractors/audio.extractor';
+import { probeAudioChapters, probeAudioFile, type AudioChapterProbe, type AudioFileProbe } from './extractors/audio.extractor';
 import type { FormatExtractOptions, ParsedBookData } from './extractors/format-extractor.interface';
 import { METADATA_AUDIO_FORMATS, MetadataExtractionService } from './metadata-extraction.service';
 import { MetadataEventsService, METADATA_AUTHORS_REPLACED } from './metadata-events.service';
@@ -104,6 +107,7 @@ export class MetadataService {
     private readonly bookMetadataLockService: BookMetadataLockService,
     private readonly coverStore: BookCoverStore,
     private readonly audiobookChapters: AudiobookChaptersService,
+    @Inject(audioToolsConfig.KEY) private readonly audioTools: ConfigType<typeof audioToolsConfig>,
     @Optional() private readonly embedder: BookEmbedderService,
     @Optional() private readonly metadataEvents?: MetadataEventsService,
     @Optional() private readonly seriesIdentity?: SeriesIdentityService,
@@ -478,14 +482,14 @@ export class MetadataService {
         );
         return false;
       }
-      const data = await this.extractionService.extract(absolutePath, format);
-      if (!data?.cover) {
+      const cover = await this.readCoverToRefresh(absolutePath, format, medium);
+      if (!cover) {
         this.logger.debug(
           `[${event}] [end] bookId=${bookId} format=${format} durationMs=${Date.now() - startedAt} refreshed=false coverFound=false - cover refresh skipped`,
         );
         return false;
       }
-      if (!(await this.persistCover(bookId, medium, data.cover, false, 'embedded'))) return false;
+      if (!(await this.persistCover(bookId, medium, cover, false, 'embedded'))) return false;
     } catch (error) {
       const errorClass = error instanceof Error ? error.name : 'Error';
       const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : String(error));
@@ -500,6 +504,12 @@ export class MetadataService {
       `[${event}] [end] bookId=${bookId} format=${format} durationMs=${Date.now() - startedAt} refreshed=true - cover refresh completed`,
     );
     return true;
+  }
+
+  /** An EPUB's audio slot refreshes from the audiobook cover it declares; its book cover belongs to the ebook slot. */
+  private async readCoverToRefresh(absolutePath: string, format: string, medium: CoverMedium): Promise<Buffer | null> {
+    if (medium === 'audio' && format.toLowerCase() === 'epub') return this.extractionService.extractEmbeddedCover(absolutePath, format, 'audio');
+    return (await this.extractionService.extract(absolutePath, format))?.cover ?? null;
   }
 
   // ── Audio helpers ────────────────────────────────────────────────────────────
@@ -535,8 +545,15 @@ export class MetadataService {
    * With no file changed this first checks the stored list against the files, so books scanned
    * before chapters were merged are repaired without re-probing every audiobook on every scan. A
    * locked list, or one a provider, a migration or a person supplied, is never re-derived that way.
+   *
+   * `probes` carries files the caller has just read, so a scan that measured each file's length does
+   * not launch ffprobe a second time per file for the same answer.
    */
-  async extractMergedAudioChapters(bookId: number, absolutePaths: string[], options: { filesChanged: boolean }): Promise<void> {
+  async extractMergedAudioChapters(
+    bookId: number,
+    absolutePaths: string[],
+    options: { filesChanged: boolean; probes?: ReadonlyMap<string, AudioChapterProbe> },
+  ): Promise<void> {
     const event = 'metadata.merge_audio_chapters';
     const startedAt = Date.now();
     if (absolutePaths.length < 2) return;
@@ -545,9 +562,16 @@ export class MetadataService {
 
     const hints = await this.audiobookChapters.fileChapterHints(bookId);
     const byPath = new Map(hints.map((file) => [file.absolutePath, file]));
+    const probes = await mapWithConcurrency(absolutePaths, AUDIO_DURATION_PROBE_CONCURRENCY, async (absolutePath) =>
+      // A chapter write was verified against ffprobe's reading of the file, and only the same
+      // reading can confirm the file still holds exactly those chapters.
+      byPath.get(absolutePath)?.chapterWriteProvenance
+        ? probeAudioChapters(absolutePath)
+        : (options.probes?.get(absolutePath) ?? probeAudioChapters(absolutePath, this.audioTools.scanReader)),
+    );
     const sources: AudioChapterSource[] = [];
-    for (const absolutePath of absolutePaths) {
-      const { chapters, durationMs } = await probeAudioChapters(absolutePath);
+    for (const [index, absolutePath] of absolutePaths.entries()) {
+      const { chapters, durationMs } = probes[index]!;
       const hint = byPath.get(absolutePath);
       const stamp = hint?.chapterWriteProvenance;
       const stats = stamp ? await stat(absolutePath) : null;
@@ -653,13 +677,21 @@ export class MetadataService {
   }
 
   async extractAudioFileDuration(bookId: number, absolutePath: string): Promise<number | null> {
-    const durationSeconds = await parseAudioDuration(absolutePath);
-    if (durationSeconds === null) return null;
+    return (await this.measureAudioFile(bookId, absolutePath))?.durationSeconds ?? null;
+  }
+
+  /**
+   * Saves one audio file's length and returns everything its probe read, chapters included, so a
+   * chapter merge in the same pass can reuse it. Null when the file could not be read.
+   */
+  async measureAudioFile(bookId: number, absolutePath: string): Promise<AudioFileProbe | null> {
+    const probe = await probeAudioFile(absolutePath, this.audioTools.scanReader);
+    if (probe?.durationSeconds == null) return probe;
     await this.db
       .update(schema.bookFiles)
-      .set({ durationSeconds })
+      .set({ durationSeconds: probe.durationSeconds })
       .where(and(eq(schema.bookFiles.bookId, bookId), eq(schema.bookFiles.absolutePath, absolutePath)));
-    return durationSeconds;
+    return probe;
   }
 
   /**
@@ -823,7 +855,7 @@ export class MetadataService {
     if (missingAuthors.length > 0) {
       const insertedAuthors = await executor
         .insert(authors)
-        .values(missingAuthors.map((author) => ({ name: author.name, sortName: author.sortName })))
+        .values(inNameOrder(missingAuthors.map((author) => ({ name: author.name, sortName: author.sortName }))))
         .onConflictDoNothing()
         .returning({ id: authors.id, name: authors.name });
       for (const row of insertedAuthors) {
@@ -913,7 +945,7 @@ export class MetadataService {
     const genreByName = new Map<string, { id: number }>();
     const insertedGenres = await executor
       .insert(genres)
-      .values(uniqueGenres.map((name) => ({ name })))
+      .values(inNameOrder(uniqueGenres.map((name) => ({ name }))))
       .onConflictDoNothing()
       .returning({ id: genres.id, name: genres.name });
     for (const row of insertedGenres) {
@@ -946,7 +978,7 @@ export class MetadataService {
     const tagByName = new Map<string, { id: number }>();
     const insertedTags = await executor
       .insert(tags)
-      .values(uniqueTags.map((name) => ({ name })))
+      .values(inNameOrder(uniqueTags.map((name) => ({ name }))))
       .onConflictDoNothing()
       .returning({ id: tags.id, name: tags.name });
     for (const row of insertedTags) {

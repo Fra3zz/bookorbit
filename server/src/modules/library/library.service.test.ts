@@ -19,7 +19,10 @@ import { readdir, rm, stat } from 'fs/promises';
 
 import { ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
 import { isPrimaryFormat } from '../scanner/lib/classify';
+import { LibraryOperationGate } from '../../common/services/library-operation-gate.service';
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
 import { LibraryService } from './library.service';
+import { LibraryLifecycleService } from './library-lifecycle.service';
 
 const mockReaddir = readdir as MockedFunction<typeof readdir>;
 const mockRm = rm as MockedFunction<typeof rm>;
@@ -35,13 +38,16 @@ function dirent(name: string, kind: 'file' | 'dir') {
 }
 
 describe('LibraryService', () => {
+  const scopeRepo = {
+    findAllIds: vi.fn(),
+    findExistingIds: vi.fn(),
+    findGrantedLevels: vi.fn(),
+    findGrantedLevel: vi.fn(),
+    findIsSuperuser: vi.fn(),
+  };
   const libraryRepo = {
-    hasUserAccess: vi.fn(),
-    findUserAccessLevel: vi.fn(),
     findAll: vi.fn(),
     findAllForUser: vi.fn(),
-    findAllIds: vi.fn(),
-    findAccessibleIdsForUser: vi.fn(),
     findAllFolders: vi.fn(),
     findFoldersByLibraryIds: vi.fn(),
     findById: vi.fn(),
@@ -54,7 +60,7 @@ describe('LibraryService', () => {
     deleteFolder: vi.fn(),
     findBookIdsByLibrary: vi.fn(),
     delete: vi.fn(),
-    findAllFolderPaths: vi.fn(),
+    findAllFolderPaths: vi.fn().mockResolvedValue([]),
     getStats: vi.fn(),
     getStatsForLibraries: vi.fn(),
     updateDisplayOrders: vi.fn(),
@@ -65,7 +71,7 @@ describe('LibraryService', () => {
   };
 
   const config = { get: vi.fn().mockReturnValue('/books') };
-  const scannerService = { startScanAsync: vi.fn(), getLatestScans: vi.fn() };
+  const scannerService = { startScanAsync: vi.fn(), getLatestScans: vi.fn(), forgetLibraryRoots: vi.fn() };
   const fileWatcherService = { startWatcher: vi.fn(), stopWatcher: vi.fn() };
   const fileWriteService = {
     findNonMissingPrimaryFilesByLibrary: vi.fn(),
@@ -86,11 +92,15 @@ describe('LibraryService', () => {
   const regexMetadata = { validate: vi.fn() };
   let service: LibraryService;
   let readingEvents: ReadingAttemptEventsService;
+  let libraryGate: LibraryOperationGate;
+  let lifecycle: LibraryLifecycleService;
 
   beforeEach(() => {
     vi.resetAllMocks();
     config.get.mockReturnValue('/books');
     readingEvents = new ReadingAttemptEventsService();
+    libraryGate = new LibraryOperationGate();
+    lifecycle = new LibraryLifecycleService();
     service = new LibraryService(
       libraryRepo as any,
       config as any,
@@ -102,9 +112,13 @@ describe('LibraryService', () => {
       scanScheduler as any,
       regexMetadata as any,
       readingEvents,
+      libraryGate,
+      new LibraryScopeService(scopeRepo as any),
+      lifecycle,
     );
 
     libraryRepo.findById.mockResolvedValue([{ id: 1 }]);
+    libraryRepo.findAllFolderPaths.mockResolvedValue([]);
     libraryRepo.findByIds.mockImplementation((ids: number[]) => Promise.resolve(ids.map((id) => ({ id }))));
     mockStat.mockResolvedValue({ isDirectory: () => true } as Awaited<ReturnType<typeof stat>>);
     mockReaddir.mockResolvedValue([] as unknown as Awaited<ReturnType<typeof readdir>>);
@@ -142,8 +156,11 @@ describe('LibraryService', () => {
   });
 
   it('findAccessibleLibraryIds reads all IDs for superusers and scoped IDs for normal users', async () => {
-    libraryRepo.findAllIds.mockResolvedValue([{ id: 1 }, { id: 2 }]);
-    libraryRepo.findAccessibleIdsForUser.mockResolvedValue([{ id: 3 }, { id: 4 }]);
+    scopeRepo.findAllIds.mockResolvedValue([1, 2]);
+    scopeRepo.findGrantedLevels.mockResolvedValue([
+      { id: 3, accessLevel: 'viewer' },
+      { id: 4, accessLevel: 'editor' },
+    ]);
 
     await expect(service.findAccessibleLibraryIds({ id: 99, isSuperuser: true, contentFilters: EMPTY_CONTENT_FILTER_RULES } as any)).resolves.toEqual(
       [1, 2],
@@ -154,18 +171,18 @@ describe('LibraryService', () => {
   });
 
   it('findEditableLibraryIds reads all IDs for superusers and editor-or-owner IDs for normal users', async () => {
-    libraryRepo.findAllIds.mockResolvedValue([{ id: 1 }, { id: 2 }]);
-    libraryRepo.findAccessibleIdsForUser.mockResolvedValue([{ id: 4 }]);
+    scopeRepo.findAllIds.mockResolvedValue([1, 2]);
+    scopeRepo.findGrantedLevels.mockResolvedValue([{ id: 4, accessLevel: 'editor' }]);
 
     await expect(service.findEditableLibraryIds({ id: 99, isSuperuser: true, contentFilters: EMPTY_CONTENT_FILTER_RULES } as any)).resolves.toEqual([
       1, 2,
     ]);
-    expect(libraryRepo.findAccessibleIdsForUser).not.toHaveBeenCalled();
+    expect(scopeRepo.findGrantedLevels).not.toHaveBeenCalled();
 
     await expect(service.findEditableLibraryIds({ id: 42, isSuperuser: false, contentFilters: EMPTY_CONTENT_FILTER_RULES } as any)).resolves.toEqual([
       4,
     ]);
-    expect(libraryRepo.findAccessibleIdsForUser).toHaveBeenCalledWith(42, ['editor', 'owner']);
+    expect(scopeRepo.findGrantedLevels).toHaveBeenCalledWith(42, ['editor', 'owner']);
   });
 
   it('findOne returns library details and normalizes organization mode', async () => {
@@ -219,7 +236,7 @@ describe('LibraryService', () => {
       { rules: [{ ...first, pattern: '(?<title>.*)' }, second] },
     ])('validates and persists an actual change without a library grant: %j', async (changed) => {
       await service.update(2, { regexMetadata: changed });
-      expect(libraryRepo.hasUserAccess).not.toHaveBeenCalled();
+      expect(scopeRepo.findGrantedLevel).not.toHaveBeenCalled();
       expect(regexMetadata.validate).toHaveBeenCalledWith(changed);
       expect(libraryRepo.update).toHaveBeenCalledWith(2, { regexMetadata: changed });
     });
@@ -244,21 +261,38 @@ describe('LibraryService', () => {
     });
   });
 
-  it('verifyUserAccess bypasses lookup for superusers', async () => {
-    await service.verifyUserAccess(1, 2, true);
-    expect(libraryRepo.hasUserAccess).not.toHaveBeenCalled();
+  it('verifyAccess bypasses lookup for superusers', async () => {
+    await service.verifyAccess({ id: 1, isSuperuser: true }, 2);
+    expect(scopeRepo.findGrantedLevel).not.toHaveBeenCalled();
   });
 
-  it('verifyUserAccess throws when user has no library access', async () => {
-    libraryRepo.hasUserAccess.mockResolvedValue(false);
-    await expect(service.verifyUserAccess(1, 2, false)).rejects.toThrow('No access to this library');
+  it('verifyAccess throws when user has no library access', async () => {
+    scopeRepo.findGrantedLevel.mockResolvedValue(null);
+    await expect(service.verifyAccess({ id: 1, isSuperuser: false }, 2)).rejects.toThrow('No access to this library');
   });
 
-  it('verifyUserAccessLevel enforces the required library role', async () => {
-    libraryRepo.findUserAccessLevel.mockResolvedValue('viewer');
+  it('verifyAccessLevel enforces the required library role', async () => {
+    scopeRepo.findGrantedLevel.mockResolvedValue('viewer');
 
-    await expect(service.verifyUserAccessLevel(1, 2, false, 'editor')).rejects.toThrow('Insufficient library access level');
-    await expect(service.verifyUserAccessLevel(1, 2, true, 'owner')).resolves.toBeUndefined();
+    await expect(service.verifyAccessLevel({ id: 1, isSuperuser: false }, 2, 'editor')).rejects.toThrow('Insufficient library access level');
+    await expect(service.verifyAccessLevel({ id: 1, isSuperuser: true }, 2, 'owner')).resolves.toBeUndefined();
+  });
+
+  it('findAll narrows a library-limited API key to its libraries and caps a read key at viewer', async () => {
+    scopeRepo.findGrantedLevels.mockResolvedValue([
+      { id: 10, accessLevel: 'editor' },
+      { id: 11, accessLevel: 'viewer' },
+    ]);
+    libraryRepo.findAllForUser.mockResolvedValue([
+      { id: 10, name: 'A', accessLevel: 'editor' },
+      { id: 11, name: 'B', accessLevel: 'viewer' },
+    ]);
+    libraryRepo.findFoldersByLibraryIds.mockResolvedValue([]);
+    const credential = { kind: 'api_key', keyId: 1, keyName: 'k', audience: 'api', access: 'read', libraryIds: [10], ownerIsSuperuser: false };
+
+    const result = await service.findAll({ id: 7, isSuperuser: false, contentFilters: EMPTY_CONTENT_FILTER_RULES, credential } as any);
+
+    expect(result.map(({ id, accessLevel }: any) => ({ id, accessLevel }))).toEqual([{ id: 10, accessLevel: 'viewer' }]);
   });
 
   it.each([undefined, ['regex', 'embedded']])('preserves regex configuration with precedence %j on create', async (metadataPrecedence) => {
@@ -447,6 +481,78 @@ describe('LibraryService', () => {
     expect(fileWatcherService.stopWatcher).not.toHaveBeenCalled();
   });
 
+  describe('overlapping folders', () => {
+    const others = [
+      { libraryId: 7, path: '/media/books', libraryName: 'Books' },
+      { libraryId: 3, path: '/media/audio', libraryName: 'Current' },
+      { libraryId: 3, path: '/media/audio/podcasts', libraryName: 'Current' },
+    ];
+
+    beforeEach(() => {
+      libraryRepo.findAllFolderPaths.mockResolvedValue(others);
+      libraryRepo.findByName.mockResolvedValue([]);
+      libraryRepo.findById.mockResolvedValue([{ id: 3, name: 'Current', icon: 'BookOpen', watch: false }]);
+      libraryRepo.update.mockResolvedValue([{ id: 3, name: 'Current' }]);
+      libraryRepo.findFoldersByLibrary.mockResolvedValue([
+        { id: 1, path: '/media/audio' },
+        { id: 2, path: '/media/audio/podcasts' },
+      ]);
+    });
+
+    async function refusal(promise: Promise<unknown>) {
+      const error = await promise.then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(error).toBeInstanceOf(ConflictException);
+      return (error as ConflictException).getResponse();
+    }
+
+    it.each([
+      ['inside another library folder', '/media/books/comics', '/media/books'],
+      ['around another library folder', '/media', '/media/books'],
+      ['on another library folder', '/media/books', '/media/books'],
+    ])('refuses a new library with a folder %s', async (_case, path, overlapPath) => {
+      await expect(refusal(service.create({ name: 'New', icon: 'BookOpen', folders: [path] } as any))).resolves.toMatchObject({
+        errorCode: 'LIBRARY_FOLDER_OVERLAP',
+        errorMeta: { path, overlapPath, overlapLibrary: 'Books' },
+      });
+      expect(libraryRepo.insert).not.toHaveBeenCalled();
+    });
+
+    it('refuses a new library whose own folders sit inside one another', async () => {
+      await expect(
+        refusal(service.create({ name: 'New', icon: 'BookOpen', folders: ['/srv/comics', '/srv/comics/manga'] } as any)),
+      ).resolves.toMatchObject({ errorCode: 'LIBRARY_FOLDER_OVERLAP', errorMeta: { path: '/srv/comics', overlapPath: '/srv/comics/manga' } });
+      expect(libraryRepo.insert).not.toHaveBeenCalled();
+    });
+
+    it('accepts a folder that only shares a name prefix with another', async () => {
+      libraryRepo.insert.mockResolvedValue([{ id: 9, name: 'New', icon: 'BookOpen' }]);
+      libraryRepo.insertFolders.mockResolvedValue([{ id: 20, path: '/media/books2' }]);
+
+      await expect(service.create({ name: 'New', icon: 'BookOpen', folders: ['/media/books2'] } as any)).resolves.toBeDefined();
+    });
+
+    it('refuses an added folder that overlaps another folder of the same library before changing anything', async () => {
+      await expect(
+        refusal(service.update(3, { name: 'Renamed', folders: ['/media/audio', '/media/audio/podcasts', '/media/audio/books'] } as any)),
+      ).resolves.toMatchObject({ errorCode: 'LIBRARY_FOLDER_OVERLAP', errorMeta: { path: '/media/audio/books', overlapPath: '/media/audio' } });
+      expect(libraryRepo.update).not.toHaveBeenCalled();
+      expect(libraryRepo.insertFolders).not.toHaveBeenCalled();
+    });
+
+    it('keeps saving a library whose folders overlapped before the rule, and drops the cached folder list only when they change', async () => {
+      await service.update(3, { name: 'Renamed', folders: ['/media/audio', '/media/audio/podcasts'] } as any);
+      expect(libraryRepo.update).toHaveBeenCalled();
+      expect(scannerService.forgetLibraryRoots).not.toHaveBeenCalled();
+
+      await service.update(3, { folders: ['/media/audio'] } as any);
+      expect(libraryRepo.deleteFolder).toHaveBeenCalledWith(2);
+      expect(scannerService.forgetLibraryRoots).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('update rejects folders outside the configured browse root before changing the library', async () => {
     libraryRepo.findById.mockResolvedValue([{ id: 3, name: 'Current', icon: 'BookOpen', watch: false }]);
     pathPolicy.assertWithinBrowseRoot.mockRejectedValue(new ForbiddenException('outside root'));
@@ -629,6 +735,123 @@ describe('LibraryService', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it('refuses to delete a library while another operation holds it, with a code the client translates', async () => {
+    libraryRepo.findById.mockResolvedValue([{ id: 4, name: 'L' }]);
+    const releaseScan = libraryGate.tryAcquire(4, 'scan')!;
+
+    const refusal = await service.remove(4).catch((error: unknown) => error);
+
+    expect(refusal).toBeInstanceOf(ConflictException);
+    expect((refusal as ConflictException).getResponse()).toMatchObject({ errorCode: 'LIBRARY_BUSY' });
+    expect(fileWatcherService.stopWatcher).not.toHaveBeenCalled();
+    expect(libraryRepo.delete).not.toHaveBeenCalled();
+    expect(libraryGate.current(4)).toBe('scan');
+    releaseScan();
+  });
+
+  it('holds the library for the whole delete and frees it afterwards, whether the delete succeeds or fails', async () => {
+    libraryRepo.findById.mockResolvedValue([{ id: 4, name: 'L' }]);
+    libraryRepo.findBookIdsByLibrary.mockResolvedValue([]);
+    const heldDuringDelete: Array<string | null> = [];
+    libraryRepo.delete.mockImplementation(() => {
+      heldDuringDelete.push(libraryGate.current(4));
+      return Promise.resolve();
+    });
+
+    await service.remove(4);
+    expect(heldDuringDelete).toEqual(['library_delete']);
+    expect(libraryGate.isHeld(4)).toBe(false);
+
+    libraryRepo.delete.mockRejectedValueOnce(new Error('Delete failed'));
+    await expect(service.remove(4)).rejects.toThrow('Delete failed');
+    expect(libraryGate.isHeld(4)).toBe(false);
+  });
+
+  describe('lifecycle listeners', () => {
+    it('tells listeners about a delete first and follows up only once the library is gone', async () => {
+      libraryRepo.findById.mockResolvedValue([{ id: 4, name: 'Fiction' }]);
+      libraryRepo.findBookIdsByLibrary.mockResolvedValue([]);
+      const order: string[] = [];
+      lifecycle.register({
+        prepareLibraryDelete: (library) => {
+          order.push(`prepare ${library.id} ${library.name}`);
+          return Promise.resolve(() => {
+            order.push('follow-up');
+            return Promise.resolve();
+          });
+        },
+      });
+      libraryRepo.delete.mockImplementation(() => {
+        order.push('delete');
+        return Promise.resolve();
+      });
+
+      await service.remove(4);
+
+      expect(order).toEqual(['prepare 4 Fiction', 'delete', 'follow-up']);
+    });
+
+    it('skips the follow-up when the delete fails', async () => {
+      libraryRepo.findById.mockResolvedValue([{ id: 4, name: 'Fiction' }]);
+      libraryRepo.findBookIdsByLibrary.mockResolvedValue([]);
+      const followUp = vi.fn().mockResolvedValue(undefined);
+      lifecycle.register({ prepareLibraryDelete: () => Promise.resolve(followUp) });
+      libraryRepo.delete.mockRejectedValueOnce(new Error('Delete failed'));
+
+      await expect(service.remove(4)).rejects.toThrow('Delete failed');
+      expect(followUp).not.toHaveBeenCalled();
+    });
+
+    it('keeps a finished delete when a follow-up fails', async () => {
+      libraryRepo.findById.mockResolvedValue([{ id: 4, name: 'Fiction' }]);
+      libraryRepo.findBookIdsByLibrary.mockResolvedValue([]);
+      lifecycle.register({ prepareLibraryDelete: () => Promise.resolve(() => Promise.reject(new Error('listener down'))) });
+
+      await expect(service.remove(4)).resolves.toBeUndefined();
+      expect(libraryRepo.delete).toHaveBeenCalledWith(4);
+    });
+
+    it('tells listeners which folders a library loses, around their removal', async () => {
+      libraryRepo.findById.mockResolvedValue([{ id: 3, name: 'Current', icon: 'BookOpen', watch: false }]);
+      libraryRepo.findByName.mockResolvedValue([]);
+      libraryRepo.update.mockResolvedValue([{ id: 3, name: 'Current' }]);
+      libraryRepo.findFoldersByLibrary.mockResolvedValue([
+        { id: 1, path: '/media/a' },
+        { id: 2, path: '/media/b' },
+      ]);
+      const order: string[] = [];
+      lifecycle.register({
+        prepareFoldersRemove: (libraryId, folderIds) => {
+          order.push(`prepare ${libraryId} ${folderIds.join(',')}`);
+          return Promise.resolve(() => {
+            order.push('follow-up');
+            return Promise.resolve();
+          });
+        },
+      });
+      libraryRepo.deleteFolder.mockImplementation((id: number) => {
+        order.push(`delete ${id}`);
+        return Promise.resolve();
+      });
+
+      await service.update(3, { folders: ['/media/a'] } as any);
+
+      expect(order).toEqual(['prepare 3 2', 'delete 2', 'follow-up']);
+    });
+
+    it('asks listeners about new folders only, and stops before saving when one refuses', async () => {
+      libraryRepo.findById.mockResolvedValue([{ id: 3, name: 'Current', icon: 'BookOpen', watch: false }]);
+      libraryRepo.findAllFolderPaths.mockResolvedValue([{ libraryId: 3, path: '/media/a', libraryName: 'Current' }]);
+      const assertFolderPathsAllowed = vi.fn().mockRejectedValue(new ConflictException({ errorCode: 'LIBRARY_FOLDER_OVERLAPS_BOOK_DOCK' }));
+      lifecycle.register({ assertFolderPathsAllowed });
+
+      await expect(service.update(3, { folders: ['/media/a', '/data/book-dock/x'] } as any)).rejects.toBeInstanceOf(ConflictException);
+
+      expect(assertFolderPathsAllowed).toHaveBeenCalledWith(['/data/book-dock/x']);
+      expect(libraryRepo.update).not.toHaveBeenCalled();
+    });
+  });
+
   it('remove throws when library does not exist', async () => {
     libraryRepo.findById.mockResolvedValue([]);
 
@@ -717,7 +940,10 @@ describe('LibraryService', () => {
   });
 
   it('getOverview scopes to the caller and merges stats with the last scan', async () => {
-    libraryRepo.findAccessibleIdsForUser.mockResolvedValue([{ id: 1 }, { id: 2 }]);
+    scopeRepo.findGrantedLevels.mockResolvedValue([
+      { id: 1, accessLevel: 'viewer' },
+      { id: 2, accessLevel: 'viewer' },
+    ]);
     libraryRepo.getStatsForLibraries.mockResolvedValue(
       new Map([
         [1, { totalBooks: 381, totalSizeBytes: 727, formatCounts: { epub: 305 } }],
@@ -738,8 +964,8 @@ describe('LibraryService', () => {
 
     const result = await service.getOverview({ id: 7, isSuperuser: false } as any);
 
-    expect(libraryRepo.findAccessibleIdsForUser).toHaveBeenCalledWith(7);
-    expect(libraryRepo.findAllIds).not.toHaveBeenCalled();
+    expect(scopeRepo.findGrantedLevels).toHaveBeenCalledWith(7, undefined);
+    expect(scopeRepo.findAllIds).not.toHaveBeenCalled();
     expect(libraryRepo.getStatsForLibraries).toHaveBeenCalledWith([1, 2]);
     expect(result).toEqual([
       { libraryId: 1, totalBooks: 381, totalSizeBytes: 727, formatCounts: { epub: 305 }, lastScan },
@@ -748,7 +974,7 @@ describe('LibraryService', () => {
   });
 
   it('getOverview returns nothing and issues no queries when the caller has no libraries', async () => {
-    libraryRepo.findAllIds.mockResolvedValue([]);
+    scopeRepo.findAllIds.mockResolvedValue([]);
 
     const result = await service.getOverview({ id: 1, isSuperuser: true } as any);
 
@@ -758,7 +984,7 @@ describe('LibraryService', () => {
   });
 
   it('getOverview maps repository overflow errors to InternalServerErrorException', async () => {
-    libraryRepo.findAllIds.mockResolvedValue([{ id: 1 }]);
+    scopeRepo.findAllIds.mockResolvedValue([1]);
     libraryRepo.getStatsForLibraries.mockRejectedValue(new RangeError('overflow'));
 
     await expect(service.getOverview({ id: 1, isSuperuser: true } as any)).rejects.toBeInstanceOf(InternalServerErrorException);

@@ -53,6 +53,7 @@ const koreaderMock = vi.hoisted(() => ({
   unlinkManualHashLink: vi.fn<() => Promise<void>>(),
   removeDevice: vi.fn<() => Promise<void>>(),
   setDeviceRetired: vi.fn<() => Promise<void>>(),
+  setDeviceName: vi.fn<(deviceId: string, name: string) => Promise<void>>(),
 }))
 
 const searchMock = vi.hoisted(() => ({
@@ -275,6 +276,7 @@ describe('KoreaderSettings', () => {
     koreaderMock.unlinkManualHashLink.mockResolvedValue(undefined)
     koreaderMock.removeDevice.mockResolvedValue(undefined)
     koreaderMock.setDeviceRetired.mockResolvedValue(undefined)
+    koreaderMock.setDeviceName.mockResolvedValue(undefined)
     searchMock.results.value = []
     searchMock.loading.value = false
     searchMock.loadingMore.value = false
@@ -665,6 +667,26 @@ describe('KoreaderSettings', () => {
     await flushPromises()
 
     expect(koreaderMock.linkUnmatchedBook).toHaveBeenCalledWith('a'.repeat(32), { bookId: 55 })
+  })
+
+  it('keeps the book link dialog within the viewport and makes overflow scrollable', async () => {
+    const status = makeSyncStatus({ pluginTotals: { ...makeSyncStatus().pluginTotals, unmatchedBooks: 1 } })
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+    koreaderMock.unmatchedBooks.value = [makeUnmatchedBook()]
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await buttonByText(wrapper, 'Link')!.trigger('click')
+
+    const dialog = wrapper.get('[data-testid="koreader-link-dialog"]')
+    expect(dialog.attributes('role')).toBe('dialog')
+    expect(dialog.attributes('aria-modal')).toBe('true')
+    expect(dialog.attributes('aria-labelledby')).toBe('koreader-link-dialog-title')
+    expect(dialog.classes()).toContain('max-h-[calc(100svh-1rem)]')
+    expect(dialog.classes()).toContain('overflow-y-auto')
+    expect(dialog.get('button[aria-label="Close"]')).toBeTruthy()
   })
 
   it('says what a link syncs before it is confirmed', async () => {
@@ -1103,6 +1125,86 @@ describe('KoreaderSettings', () => {
 
     expect(koreaderMock.setDeviceRetired).toHaveBeenCalledWith('device-1', true)
     expect(koreaderMock.removeDevice).not.toHaveBeenCalled()
+  })
+
+  it('renames a device from its row', async () => {
+    const base = makeSyncStatus()
+    const status = { ...base, devices: [{ ...base.devices[0]!, device: 'blazer' }] }
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await wrapper.find('button[aria-label="Rename blazer"]').trigger('click')
+    await flushPromises()
+    const input = document.body.querySelector<HTMLInputElement>('input[placeholder="blazer"]')!
+    expect(document.body.textContent).toContain('Reported model: blazer')
+    setInputValue(input, '  Pixel 8 ')
+    await flushPromises()
+    Array.from(document.body.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === 'Save')!
+      .click()
+    await flushPromises()
+
+    expect(koreaderMock.setDeviceName).toHaveBeenCalledWith('device-1', 'Pixel 8')
+    expect(toast.success).toHaveBeenCalledWith('Device renamed')
+    expect(document.body.textContent).not.toContain('Rename device')
+    wrapper.unmount()
+  })
+
+  it('shows the name a device was given with the reported model beside it', async () => {
+    const base = makeSyncStatus()
+    const status = {
+      ...base,
+      devices: [{ ...base.devices[0]!, device: 'blazer', deviceName: 'Pixel 8' }],
+      sweeps: [{ ...base.sweeps[0]!, deviceModel: 'blazer', deviceName: 'Pixel 8' }],
+    }
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.find('button[aria-label="Rename Pixel 8"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('blazer')
+    expect(wrapper.text().split('Pixel 8').length).toBeGreaterThan(2)
+  })
+
+  it('keeps the rename dialog open and reports a name the server refused', async () => {
+    const status = makeSyncStatus()
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+    koreaderMock.setDeviceName.mockRejectedValueOnce(new Error('Failed to rename KOReader device'))
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await wrapper.find('button[aria-label="Rename Kobo Libra 2"]').trigger('click')
+    await flushPromises()
+    setInputValue(document.body.querySelector<HTMLInputElement>('input[placeholder="Kobo Libra 2"]')!, 'Bedside')
+    await flushPromises()
+    Array.from(document.body.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === 'Save')!
+      .click()
+    await flushPromises()
+
+    expect(toast.error).toHaveBeenCalledWith('Failed to rename device')
+    expect(document.body.textContent).toContain('Rename device')
+    wrapper.unmount()
+  })
+
+  it('names a Kobo by the model it is sold as when the user gave it no name', async () => {
+    const base = makeSyncStatus()
+    const status = { ...base, devices: [{ ...base.devices[0]!, device: 'Kobo_monza' }] }
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.find('button[aria-label="Rename Kobo Libra Colour"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Kobo_monza')
   })
 
   it('lists retired devices in a collapsed group and restores them on request', async () => {

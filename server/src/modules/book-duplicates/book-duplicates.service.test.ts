@@ -1,8 +1,10 @@
-import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
+import { DrizzleQueryError } from 'drizzle-orm';
+import { DatabaseError } from 'pg';
 
 import type { RequestUser } from '../../common/types/request-user';
-import { BookDuplicatesService } from './book-duplicates.service';
+import { BookDuplicatesService, otherFormatKeys } from './book-duplicates.service';
 
 const user = {
   id: 7,
@@ -48,6 +50,12 @@ function setup(accessibleLibraryIds = [2]) {
     deleteDismissedPairs: vi.fn().mockResolvedValue(0),
     computeScanTotals: vi.fn().mockResolvedValue({ totalExtraCopies: 0, totalReclaimableBytes: 0 }),
     findGroupMemberIds: vi.fn().mockResolvedValue([]),
+    findGroupKind: vi.fn().mockResolvedValue('duplicate'),
+    findOtherFormatBatch: vi.fn().mockResolvedValue([]),
+    insertScanKeys: vi.fn().mockResolvedValue(undefined),
+    analyzeScanKeys: vi.fn().mockResolvedValue(undefined),
+    createOtherFormatPairs: vi.fn().mockResolvedValue(undefined),
+    finalizeOtherFormatGroups: vi.fn().mockResolvedValue(0),
     insertDismissals: vi.fn().mockResolvedValue(undefined),
     deleteDismissal: vi.fn().mockResolvedValue(1),
     listDismissals: vi.fn().mockResolvedValue([]),
@@ -57,7 +65,8 @@ function setup(accessibleLibraryIds = [2]) {
     findCandidatePreviews: vi.fn().mockResolvedValue([]),
   };
   const libraryService = { findAccessibleLibraryIds: vi.fn().mockResolvedValue(accessibleLibraryIds) };
-  return { service: new BookDuplicatesService(repo as never, libraryService as never), repo, libraryService };
+  const jobChanges = { notify: vi.fn() };
+  return { service: new BookDuplicatesService(repo as never, libraryService as never, jobChanges as never), repo, libraryService, jobChanges };
 }
 
 describe('BookDuplicatesService', () => {
@@ -114,7 +123,7 @@ describe('BookDuplicatesService', () => {
     const { service, repo } = setup();
     repo.findScan.mockResolvedValue(scanRow({ status: 'completed', totalBooks: 3, processedBooks: 3, totalGroups: 1 }));
     repo.findGroups.mockResolvedValue({
-      groups: [{ id: 5, reasons: ['isbn'], maxTitleSimilarity: null, memberCount: 2, memberBytesTotal: 900, memberBytesMax: 500 }],
+      groups: [{ id: 5, kind: 'duplicate', reasons: ['isbn'], maxTitleSimilarity: null, memberCount: 2, memberBytesTotal: 900, memberBytesMax: 500 }],
       total: 1,
     });
     repo.findPairs.mockResolvedValue([
@@ -142,12 +151,15 @@ describe('BookDuplicatesService', () => {
         added_at: new Date('2026-01-01T00:00:00.000Z'),
         updated_at: null,
         has_cover: false,
+        book_per_file: false,
       })),
     );
 
-    const result = await service.getGroups(11, { page: 1, pageSize: 20, sortBy: 'reclaimable', order: 'desc' }, user);
+    const result = await service.getGroups(11, { page: 1, pageSize: 20, sortBy: 'reclaimable', order: 'desc', kind: 'duplicate' }, user);
 
-    expect(repo.findGroups).toHaveBeenCalledWith(11, 1, 20, [2], user, undefined, 'reclaimable', 'desc');
+    expect(repo.findGroups).toHaveBeenCalledWith(11, 1, 20, [2], user, undefined, 'reclaimable', 'desc', 'duplicate');
+    expect(result.groups[0]?.kind).toBe('duplicate');
+    expect(result.groups[0]?.books[0]?.bookPerFile).toBe(false);
     expect(result.groups[0]?.pairs).toEqual([{ bookIdA: 1, bookIdB: 2, reasons: ['isbn'], titleSimilarity: null }]);
     expect(result.groups[0]?.reclaimableBytes).toBe(400);
   });
@@ -159,7 +171,7 @@ describe('BookDuplicatesService', () => {
 
     await service.dismissGroup({ scanId: 11, groupId: 5 }, user);
 
-    expect(repo.insertDismissals).toHaveBeenCalledWith(7, [
+    expect(repo.insertDismissals).toHaveBeenCalledWith(7, 'duplicate', [
       { bookIdA: 4, bookIdB: 7 },
       { bookIdA: 4, bookIdB: 9 },
       { bookIdA: 7, bookIdB: 9 },
@@ -180,11 +192,24 @@ describe('BookDuplicatesService', () => {
 
     await service.restoreDismissal(9, 4, user);
 
-    expect(repo.deleteDismissal).toHaveBeenCalledWith(7, 4, 9);
+    expect(repo.deleteDismissal).toHaveBeenCalledWith(7, 'duplicate', 4, 9);
+  });
+
+  it('keeps an other-format dismissal apart from a duplicate one', async () => {
+    const { service, repo } = setup();
+    repo.findScan.mockResolvedValue(scanRow({ status: 'completed' }));
+    repo.findGroupKind.mockResolvedValue('other_format');
+    repo.findGroupMemberIds.mockResolvedValue([8, 3]);
+
+    await service.dismissGroup({ scanId: 11, groupId: 6 }, user);
+    await service.restoreDismissal(8, 3, user, 'other_format');
+
+    expect(repo.insertDismissals).toHaveBeenCalledWith(7, 'other_format', [{ bookIdA: 3, bookIdB: 8 }]);
+    expect(repo.deleteDismissal).toHaveBeenCalledWith(7, 'other_format', 3, 8);
   });
 
   it('cleans partial artifacts when a background scan fails', async () => {
-    const { service, repo } = setup();
+    const { service, repo, jobChanges } = setup();
     repo.countScopedBooks.mockResolvedValue(10);
     repo.insertFileHashKeys.mockRejectedValue(new Error('database unavailable'));
 
@@ -192,10 +217,136 @@ describe('BookDuplicatesService', () => {
 
     await vi.waitFor(() => expect(repo.deleteScanArtifacts).toHaveBeenCalledWith(11));
     expect(repo.updateScan).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'failed', errorCode: 'scan_failed' }));
+    await vi.waitFor(() => expect(jobChanges.notify).toHaveBeenLastCalledWith({ type: 'duplicate-scan', ownerId: 7, state: true }));
+  });
+
+  it('logs the PostgreSQL reason and SQLSTATE instead of the SQL Drizzle reports', async () => {
+    const { service, repo } = setup();
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      repo.countScopedBooks.mockResolvedValue(10);
+      const timeout = Object.assign(new DatabaseError('canceling statement due to statement timeout', 0, 'error'), { code: '57014' });
+      repo.createOtherFormatPairs.mockRejectedValue(new DrizzleQueryError('WITH matched AS (...)', [11, 11, 0.85], timeout));
+
+      await service.createScan({ libraryId: 2, similarityPercent: 85 }, user);
+
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('duplicate scan failed')));
+      const message = String(warn.mock.calls.at(-1)?.[0]);
+      expect(message).toContain('postgresCode=57014');
+      expect(message).toContain('error="canceling statement due to statement timeout"');
+      expect(message).not.toContain('Failed query:');
+      expect(repo.updateScan).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'failed', errorCode: 'scan_failed' }));
+      expect(repo.deleteScanArtifacts).toHaveBeenCalledWith(11);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    { case: 'a plain error', failure: new Error('database unavailable'), message: 'database unavailable' },
+    {
+      case: 'a Node system error under Drizzle',
+      failure: new DrizzleQueryError('select 1', [], Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })),
+      message: 'write EPIPE',
+    },
+    {
+      case: 'a wrapped error that is not a failed query',
+      failure: new Error('stage failed', { cause: Object.assign(new Error('inner'), { code: '57014' }) }),
+      message: 'stage failed',
+    },
+    { case: 'a non-Error rejection', failure: 'plain failure', message: 'plain failure' },
+  ])('logs no SQLSTATE for $case', async ({ failure, message }) => {
+    const { service, repo } = setup();
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      repo.countScopedBooks.mockResolvedValue(10);
+      repo.createOtherFormatPairs.mockRejectedValue(failure);
+
+      await service.createScan({ libraryId: 2, similarityPercent: 85 }, user);
+
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('duplicate scan failed')));
+      const logged = String(warn.mock.calls.at(-1)?.[0]);
+      expect(logged).toContain('postgresCode=none');
+      expect(logged).toContain(`error="${message}"`);
+      expect(repo.updateScan).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'failed', errorCode: 'scan_failed' }));
+      expect(repo.deleteScanArtifacts).toHaveBeenCalledWith(11);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('scans all accessible libraries when no library is selected', async () => {
+    const { service, repo } = setup([2, 3]);
+    repo.countScopedBooks.mockResolvedValue(2);
+    repo.findScan.mockResolvedValue(scanRow({ libraryIds: [2, 3], requestedLibraryId: null }));
+    repo.createScanUnlessActive.mockResolvedValue(scanRow({ libraryIds: [2, 3], requestedLibraryId: null }));
+
+    await service.createScan({ similarityPercent: 85 }, user);
+
+    await vi.waitFor(() => expect(repo.updateScan).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'completed' })));
+    expect(repo.createScanUnlessActive).toHaveBeenCalledWith({
+      userId: 7,
+      libraryIds: [2, 3],
+      requestedLibraryId: null,
+      similarityPercent: 85,
+    });
+    expect(repo.insertFileHashKeys).toHaveBeenCalledWith(11, [2, 3], user);
+    expect(repo.findIsbnBatch).toHaveBeenCalledWith([2, 3], user, 0, 500);
+    expect(repo.findOtherFormatBatch).toHaveBeenCalledWith([2, 3], user, 0, 500);
+    expect(repo.createOtherFormatPairs).toHaveBeenCalledWith(11, 85);
+  });
+
+  it('analyzes populated cross-format keys before running the indexed matching query', async () => {
+    const { service, repo } = setup();
+    repo.countScopedBooks.mockResolvedValue(2);
+    repo.findOtherFormatBatch
+      .mockResolvedValueOnce([
+        {
+          id: 4,
+          title: 'Dune',
+          hardcover_id: '123',
+          open_library_id: null,
+          series_id: null,
+          series_index: null,
+          formats: ['epub'],
+          authors: ['Frank Herbert'],
+          narrators: [],
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    await service.createScan({ libraryId: 2, similarityPercent: 85 }, user);
+
+    await vi.waitFor(() => expect(repo.updateScan).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'completed' })));
+    expect(repo.insertScanKeys).toHaveBeenCalledTimes(1);
+    expect(repo.analyzeScanKeys).toHaveBeenCalledTimes(1);
+    expect(repo.insertScanKeys.mock.invocationCallOrder[0]).toBeLessThan(repo.analyzeScanKeys.mock.invocationCallOrder[0]!);
+    expect(repo.analyzeScanKeys.mock.invocationCallOrder[0]).toBeLessThan(repo.createOtherFormatPairs.mock.invocationCallOrder[0]!);
+  });
+
+  it('still matches and completes the scan when refreshing statistics fails', async () => {
+    const { service, repo } = setup();
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      repo.countScopedBooks.mockResolvedValue(2);
+      const lockTimeout = Object.assign(new DatabaseError('canceling statement due to lock timeout', 0, 'error'), { code: '55P03' });
+      repo.analyzeScanKeys.mockRejectedValue(new DrizzleQueryError('ANALYZE "book_duplicate_scan_keys"', [], lockTimeout));
+
+      await service.createScan({ libraryId: 2, similarityPercent: 85 }, user);
+
+      await vi.waitFor(() => expect(repo.updateScan).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'completed' })));
+      expect(repo.createOtherFormatPairs).toHaveBeenCalledWith(11, 85);
+      expect(repo.deleteScanArtifacts).not.toHaveBeenCalled();
+      const logged = String(warn.mock.calls.find(([line]) => String(line).includes('[book_duplicates.scan_keys_analyze] [fail]'))?.[0]);
+      expect(logged).toContain('postgresCode=55P03');
+      expect(logged).toContain('error="canceling statement due to lock timeout"');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('runs every bounded scan stage and completes a non-empty library', async () => {
-    const { service, repo } = setup();
+    const { service, repo, jobChanges } = setup();
     repo.countScopedBooks.mockResolvedValue(2);
     repo.findIsbnBatch.mockResolvedValueOnce([{ id: 3, isbn10: '0306406152', isbn13: null, formats: ['epub', 'EPUB'] }]).mockResolvedValueOnce([]);
     repo.finalizeGroups.mockResolvedValue(1);
@@ -207,9 +358,16 @@ describe('BookDuplicatesService', () => {
     expect(repo.insertExactMetadataKeys).toHaveBeenCalledWith(11, [2], user);
     expect(repo.createExactPairs).toHaveBeenCalledWith(11);
     expect(repo.createFuzzyPairs).toHaveBeenCalledWith(11, [2], user, 85);
+    expect(repo.createOtherFormatPairs).toHaveBeenCalledWith(11, 85);
+    expect(repo.finalizeOtherFormatGroups).toHaveBeenCalledWith(11);
     expect(repo.deleteDismissedPairs).toHaveBeenCalledWith(11, 7);
     expect(repo.updateScan).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'completed', totalExtraCopies: 0, totalReclaimableBytes: 0 }));
     expect(repo.deleteScanKeys).toHaveBeenCalledWith(11);
+    // The Jobs area hears the request, the start, every stage as progress only, and the end.
+    await vi.waitFor(() => expect(jobChanges.notify).toHaveBeenLastCalledWith({ type: 'duplicate-scan', ownerId: 7, state: true }));
+    const calls = jobChanges.notify.mock.calls.map(([change]) => (change as { state: boolean }).state);
+    expect(calls.slice(0, 2)).toEqual([true, true]);
+    expect(calls.filter((state) => !state)).toHaveLength(7);
   });
 
   it('rejects completed results when the saved library scope is no longer accessible', async () => {
@@ -218,5 +376,57 @@ describe('BookDuplicatesService', () => {
 
     await expect(service.getGroups(11, { page: 1, pageSize: 20, sortBy: 'reclaimable', order: 'desc' }, user)).rejects.toThrow(ForbiddenException);
     expect(repo.findGroups).not.toHaveBeenCalled();
+  });
+});
+
+describe('otherFormatKeys', () => {
+  function row(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 4,
+      title: 'The Hobbit',
+      hardcover_id: null,
+      open_library_id: null,
+      series_id: null,
+      series_index: null,
+      formats: ['epub'],
+      authors: ['J.R.R. Tolkien'],
+      narrators: [],
+      ...overrides,
+    };
+  }
+  const values = (keys: ReturnType<typeof otherFormatKeys>, kind: string) => keys.filter((key) => key.kind === kind).map((key) => key.value);
+
+  it('gives an ebook and its audiobook the same title key on opposite sides', () => {
+    const ebook = otherFormatKeys(11, row());
+    const audio = otherFormatKeys(11, row({ id: 5, title: 'The Hobbit (Unabridged)', formats: ['m4b'], authors: [], narrators: ['JRR Tolkien'] }));
+
+    const ebookTitle = values(ebook, 'of_title');
+    const audioTitle = values(audio, 'of_title');
+    expect(ebookTitle[0]?.startsWith('e|')).toBe(true);
+    expect(audioTitle[0]?.startsWith('a|')).toBe(true);
+    expect(ebookTitle.map((value) => value.slice(2))).toEqual(audioTitle.map((value) => value.slice(2)));
+  });
+
+  it('keys work-level provider ids only', () => {
+    const keys = otherFormatKeys(11, row({ hardcover_id: ' 123 ', open_library_id: 'OL1W' }));
+    const other = otherFormatKeys(11, row({ id: 5, formats: ['mp3'], hardcover_id: '123', open_library_id: 'ol1w' }));
+
+    expect(values(keys, 'of_work')).toHaveLength(2);
+    expect(values(keys, 'of_work').map((value) => value.slice(2))).toEqual(values(other, 'of_work').map((value) => value.slice(2)));
+  });
+
+  it('keys a series position in its canonical spelling', () => {
+    expect(values(otherFormatKeys(11, row({ series_id: 9, series_index: '01' })), 'of_series')).toEqual(['e|9|1']);
+    expect(values(otherFormatKeys(11, row({ series_id: 9, series_index: '1.0', formats: ['m4b'] })), 'of_series')).toEqual(['a|9|1']);
+  });
+
+  it('skips books that hold both media or neither', () => {
+    expect(otherFormatKeys(11, row({ formats: ['epub', 'm4b'] }))).toEqual([]);
+    expect(otherFormatKeys(11, row({ formats: ['cbz'] }))).toEqual([]);
+    expect(otherFormatKeys(11, row({ formats: [] }))).toEqual([]);
+  });
+
+  it('has no title key without a person to match', () => {
+    expect(values(otherFormatKeys(11, row({ authors: [], narrators: [] })), 'of_title')).toEqual([]);
   });
 });

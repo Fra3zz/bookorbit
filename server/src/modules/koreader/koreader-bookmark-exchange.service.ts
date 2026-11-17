@@ -1,3 +1,4 @@
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
 import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 
@@ -9,7 +10,7 @@ import { PositionConverterService } from '../position-converter/position-convert
 import type { BookmarkAckBookDto, BookmarkExchangeAckDto, BookmarkExchangeBookDto, BookmarkExchangeDto, KoreaderBookmarkDto } from './dto';
 import { KoreaderBookmarkRepository } from './koreader-bookmark.repository';
 import { KoreaderRepository } from './koreader.repository';
-import { exchangeDeviceId } from './koreader-exchange-device';
+import { exchangeDeviceId } from '../../common/utils/koreader-exchange-device.utils';
 
 const EXCHANGE_EVENT = 'koreader.bookmark_exchange';
 const ACK_EVENT = 'koreader.bookmark_exchange_ack';
@@ -79,6 +80,7 @@ export class KoreaderBookmarkExchangeService {
     private readonly bookmarkRepo: KoreaderBookmarkRepository,
     private readonly bookmarkSync: BookmarkSyncService,
     private readonly positionConverter: PositionConverterService,
+    private readonly libraryScope: LibraryScopeService,
   ) {}
 
   async exchange(user: RequestUser, dto: BookmarkExchangeDto): Promise<BookmarkExchangeResponse> {
@@ -157,7 +159,7 @@ export class KoreaderBookmarkExchangeService {
   }
 
   private async resolveBooks(userId: number, books: { hash: string }[]) {
-    const accessibleLibraryIds = await this.koreaderRepo.getAccessibleLibraryIds(userId);
+    const accessibleLibraryIds = await this.libraryScope.visibleIdsOrAllForUserId(userId);
     const hashes = [...new Set(books.map((book) => book.hash.toLowerCase()))];
     return this.koreaderRepo.resolveBookFilesByHashes(hashes, accessibleLibraryIds, userId);
   }

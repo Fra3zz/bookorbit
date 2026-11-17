@@ -4,7 +4,8 @@ import { Test } from '@nestjs/testing';
 import { tmpdir } from 'os';
 import { EMPTY_CONTENT_FILTER_RULES, Permission, type AccessLevel } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
-import { LibraryRepository } from '../library/library.repository';
+import { LibraryScopeRepository } from '../../common/library-scope/library-scope.repository';
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
 import { LibraryService } from '../library/library.service';
 import { MetadataService } from '../metadata/metadata.service';
 import { MetadataFetchPipeline } from '../metadata-fetch/metadata-fetch-pipeline';
@@ -16,6 +17,7 @@ import { CoverService } from '../cover/cover.service';
 import { BulkEditFieldsDto } from './dto/bulk-edit-metadata.dto';
 import { BookRepository } from './book.repository';
 import { BookReadService } from './book-read.service';
+import { BookAliasService } from '../book-alias/book-alias.service';
 import { BookService } from './book.service';
 import { BookEmbedderService } from '../embedding/book-embedder.service';
 import { MetadataScoreService } from '../metadata-score/metadata-score.service';
@@ -52,9 +54,8 @@ async function createContext(role: AccessLevel | null = 'viewer') {
     [2, 8],
     [3, 9],
   ]);
-  const libraryRepo = {
-    hasUserAccess: vi.fn((_userId: number, libraryId: number) => Boolean(roles.get(libraryId))),
-    findUserAccessLevel: vi.fn((_userId: number, libraryId: number) => roles.get(libraryId) ?? null),
+  const scopeRepo = {
+    findGrantedLevel: vi.fn((_userId: number, libraryId: number) => roles.get(libraryId) ?? null),
   };
   const bookRepo = {
     findLibraryIdByBookId: vi.fn((id: number) => bookLibraries.get(id) ?? null),
@@ -112,7 +113,7 @@ async function createContext(role: AccessLevel | null = 'viewer') {
     [AudiobookEbookProgressSyncService, { syncFromEbookProgress: vi.fn(), advanceNarrationToText: vi.fn() }],
     [UserBookStatusService, { autoUpdate: vi.fn(), findOne: vi.fn() }],
     [ConfigService, { get: vi.fn().mockReturnValue(tmpdir()) }],
-    [LibraryRepository, libraryRepo],
+    [LibraryScopeRepository, scopeRepo],
     [BookRepository, bookRepo],
     [BookReadService, bookRepo],
     [MetadataService, metadata],
@@ -121,8 +122,9 @@ async function createContext(role: AccessLevel | null = 'viewer') {
     [BookCoverStore, coverStore],
     [FileWriteService, fileWrite],
     [FileRenameService, fileRename],
+    [BookAliasService, { resolveOne: vi.fn().mockResolvedValue(null) }],
   ]);
-  const module = await Test.createTestingModule({ providers: [BookService, LibraryService, CoverService] })
+  const module = await Test.createTestingModule({ providers: [BookService, LibraryService, LibraryScopeService, CoverService] })
     .useMocker((token) => mocks.get(token) ?? {})
     .compile();
   const service = module.get(BookService);
@@ -133,7 +135,7 @@ async function createContext(role: AccessLevel | null = 'viewer') {
     covers: module.get(CoverService),
     roles,
     bookRepo,
-    libraryRepo,
+    scopeRepo,
     metadata,
     locks,
     pipeline,
@@ -169,8 +171,15 @@ const bulkWrites: { name: string; run: (ctx: Context, ids: number[]) => Promise<
     name: 'edit metadata',
     run: ({ service }, ids) => service.bulkEditMetadata(ids, Object.assign(new BulkEditFieldsDto(), { publisher: { value: 'Changed' } }), user),
   },
-  { name: 'refresh metadata', run: ({ service }, ids) => service.bulkRefreshMetadata(ids, user) },
+  // The bulk run routes (refresh, re-extract, embed) resolve the selection this way before creating a run.
+  { name: 'bulk run selection', run: ({ service }, ids) => service.resolveSelectionToIds({ bookIds: ids }, user, 'editor') },
   { name: 'regenerate covers', run: ({ service }, ids) => service.bulkReExtractCover(ids, user) },
+];
+
+const bulkRunItems: { name: string; run: (ctx: Context, id: number) => Promise<unknown> }[] = [
+  { name: 'refresh metadata', run: ({ service }, id) => service.refreshMetadataBulkItem(id, user) },
+  { name: 'regenerate covers', run: ({ service }, id) => service.reExtractCoverBulkItem(id, user) },
+  { name: 'embed audiobook cover', run: ({ service }, id) => service.embedAudioCoverBulkItem(id, user) },
 ];
 
 function expectNoWrites(ctx: Context) {
@@ -243,6 +252,12 @@ describe('library roles for book metadata writes', () => {
     expectNoWrites(ctx);
   });
 
+  it.each(bulkRunItems)('passes over a viewer-only book in a bulk $name run without writing', async ({ run }) => {
+    const ctx = await context();
+    await expect(run(ctx, 1)).resolves.toEqual(expect.objectContaining({ status: 'skipped', code: 'no-access' }));
+    expectNoWrites(ctx);
+  });
+
   it.each(['editor', 'owner'] as const)('allows %s to persist metadata', async (role) => {
     const ctx = await context(role);
     await ctx.service.updateMetadata(1, { title: 'Changed' }, user);
@@ -253,8 +268,7 @@ describe('library roles for book metadata writes', () => {
     const ctx = await context(null);
     await ctx.service.updateMetadata(1, { title: 'Changed' }, { ...user, isSuperuser: true, permissions: [] });
     expect(ctx.bookRepo.updateMetadataFields).toHaveBeenCalled();
-    expect(ctx.libraryRepo.hasUserAccess).not.toHaveBeenCalled();
-    expect(ctx.libraryRepo.findUserAccessLevel).not.toHaveBeenCalled();
+    expect(ctx.scopeRepo.findGrantedLevel).not.toHaveBeenCalled();
   });
 
   it('keeps missing membership and missing books concealed as 404', async () => {
@@ -268,7 +282,7 @@ describe('library roles for book metadata writes', () => {
     const ctx = await context();
     ctx.bookRepo.checkBookPassesContentFilters.mockResolvedValue(false);
     await expect(ctx.service.updateMetadata(1, { title: 'Changed' }, user)).rejects.toThrow(NotFoundException);
-    expect(ctx.libraryRepo.findUserAccessLevel).not.toHaveBeenCalled();
+    expect(ctx.scopeRepo.findGrantedLevel).toHaveBeenCalledTimes(1);
     expectNoWrites(ctx);
   });
 
@@ -287,7 +301,7 @@ describe('library roles for book metadata writes', () => {
     const ctx = await context('editor');
     await ctx.service.bulkSetMetadataLock([1, 2, 3, 1], true, user);
     expect(ctx.bookRepo.findLibraryIdsByBookIds).toHaveBeenCalledWith([1, 2, 3]);
-    expect(ctx.libraryRepo.findUserAccessLevel.mock.calls).toEqual([
+    expect(ctx.scopeRepo.findGrantedLevel.mock.calls).toEqual([
       [user.id, 7],
       [user.id, 8],
       [user.id, 9],
@@ -305,6 +319,5 @@ describe('library roles for book metadata writes', () => {
     const ctx = await context();
     await ctx.service.saveProgress(user.id, 10, { percentage: 25 }, user);
     expect(ctx.bookRepo.upsertProgress).toHaveBeenCalled();
-    expect(ctx.libraryRepo.findUserAccessLevel).not.toHaveBeenCalled();
   });
 });

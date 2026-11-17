@@ -2,6 +2,7 @@ import { BadRequestException, Inject, Injectable, Logger, NotFoundException } fr
 import { ConfigService, type ConfigType } from '@nestjs/config';
 
 import {
+  type ApiKeySettings,
   type BookRequestImportFormats,
   BOOK_REQUEST_AUTOMATION_SETTING_KEYS,
   BOOK_REQUEST_IMPORT_FORMATS,
@@ -20,10 +21,13 @@ import {
 import { StatsCache } from '../../common/cache/stats-cache';
 import { storageConfig } from '../../config/config';
 import {
+  AI_MANAGED_SETTING_PREFIX,
+  API_KEY_MANAGED_SETTING_KEYS,
   APP_SETTING_KEYS,
   BOOK_DOCK_MANAGED_SETTING_KEYS,
   DEFAULT_LIBRARY_ACCESS_CONFIG,
   DEFAULT_OIDC_CONFIG,
+  MAX_API_KEY_LIFETIME_CAP_DAYS,
   MAX_AUDIT_RETENTION_DAYS,
   type OidcFullConfig,
 } from '../../common/constants/app-settings.constants';
@@ -48,6 +52,12 @@ function parseBooleanSetting(value: string | undefined, defaultValue: boolean): 
   if (value === 'true') return true;
   if (value === 'false') return false;
   return defaultValue;
+}
+
+function parseLifetimeCap(value: string | undefined): number | null {
+  if (!value || !/^\d+$/.test(value.trim())) return null;
+  const days = parseInt(value, 10);
+  return days >= 1 && days <= MAX_API_KEY_LIFETIME_CAP_DAYS ? days : null;
 }
 
 @Injectable()
@@ -83,7 +93,13 @@ export class AppSettingsService {
 
   async update(key: string, value: string) {
     if (BOOK_DOCK_MANAGED_SETTING_KEYS.includes(key)) {
-      throw new BadRequestException(`Setting '${key}' is managed by the Book Dock endpoints and cannot be written here`);
+      throw new BadRequestException(`Setting '${key}' is managed by the Library Dock endpoints and cannot be written here`);
+    }
+    if (API_KEY_MANAGED_SETTING_KEYS.includes(key)) {
+      throw new BadRequestException(`Setting '${key}' is managed by the API key settings endpoint and cannot be written here`);
+    }
+    if (key.startsWith(AI_MANAGED_SETTING_PREFIX)) {
+      throw new BadRequestException(`Setting '${key}' is managed by the AI settings endpoints and cannot be written here`);
     }
     if (key === APP_SETTING_KEYS.MAX_UPLOAD_SIZE_MB) {
       const parsed = parseInt(value, 10);
@@ -126,6 +142,8 @@ export class AppSettingsService {
       APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_LIBRARY_ID,
       APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_FOLDER_ID,
       APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_METADATA_MODE,
+      APP_SETTING_KEYS.BOOK_DOCK_UNSORTED_AUTO_JOIN,
+      APP_SETTING_KEYS.BOOK_DOCK_UNSORTED_KEEP_ORIGINAL,
     ];
     const rows = await this.repo.findMany(keys);
     const settings = new Map(rows.map((row) => [row.key, row.value]));
@@ -140,6 +158,8 @@ export class AppSettingsService {
       autoFinalizeLibraryId: libraryId,
       autoFinalizeFolderId: folderId,
       autoFinalizeMetadataMode: parseAutoFinalizeMetadataMode(settings.get(APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_METADATA_MODE)),
+      unsortedAutoJoin: parseBooleanSetting(settings.get(APP_SETTING_KEYS.BOOK_DOCK_UNSORTED_AUTO_JOIN), false),
+      unsortedKeepOriginal: parseBooleanSetting(settings.get(APP_SETTING_KEYS.BOOK_DOCK_UNSORTED_KEEP_ORIGINAL), false),
     };
   }
 
@@ -151,6 +171,13 @@ export class AppSettingsService {
       { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_LIBRARY_ID, value: settings.autoFinalizeLibraryId?.toString() ?? '' },
       { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_FOLDER_ID, value: settings.autoFinalizeFolderId?.toString() ?? '' },
       { key: APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_METADATA_MODE, value: settings.autoFinalizeMetadataMode },
+      // Older clients do not send Unsorted's toggles; leaving them out keeps what is stored.
+      ...(settings.unsortedAutoJoin == null
+        ? []
+        : [{ key: APP_SETTING_KEYS.BOOK_DOCK_UNSORTED_AUTO_JOIN, value: String(settings.unsortedAutoJoin) }]),
+      ...(settings.unsortedKeepOriginal == null
+        ? []
+        : [{ key: APP_SETTING_KEYS.BOOK_DOCK_UNSORTED_KEEP_ORIGINAL, value: String(settings.unsortedKeepOriginal) }]),
     ]);
 
     return this.getBookDockSettings();
@@ -216,9 +243,33 @@ export class AppSettingsService {
   }
 
   private clearRuntimeSettingCache(key: string): void {
-    if (key === APP_SETTING_KEYS.CROSS_PLATFORM_PATH_SANITIZATION_ENABLED) {
+    if (key === APP_SETTING_KEYS.CROSS_PLATFORM_PATH_SANITIZATION_ENABLED || API_KEY_MANAGED_SETTING_KEYS.includes(key)) {
       this.runtimeSettingCache.clearForScope('app-settings');
     }
+  }
+
+  /** Read on every API key request, so it is cached like the other per-request settings. */
+  async getApiKeySettings(): Promise<ApiKeySettings> {
+    return this.runtimeSettingCache.get('app-settings', 'api-keys', async () => {
+      const settings = await this.getValues([...API_KEY_MANAGED_SETTING_KEYS]);
+      return {
+        enabled: parseBooleanSetting(settings.get(APP_SETTING_KEYS.API_KEYS_ENABLED), true),
+        maxLifetimeDays: parseLifetimeCap(settings.get(APP_SETTING_KEYS.API_KEYS_MAX_LIFETIME_DAYS)),
+      };
+    });
+  }
+
+  async updateApiKeySettings(settings: ApiKeySettings): Promise<ApiKeySettings> {
+    const cap = settings.maxLifetimeDays;
+    if (cap !== null && !(Number.isInteger(cap) && cap >= 1 && cap <= MAX_API_KEY_LIFETIME_CAP_DAYS)) {
+      throw new BadRequestException(`The longest key lifetime must be a whole number of days between 1 and ${MAX_API_KEY_LIFETIME_CAP_DAYS}`);
+    }
+    await this.repo.upsertMany([
+      { key: APP_SETTING_KEYS.API_KEYS_ENABLED, value: String(settings.enabled) },
+      { key: APP_SETTING_KEYS.API_KEYS_MAX_LIFETIME_DAYS, value: cap === null ? '' : String(cap) },
+    ]);
+    this.runtimeSettingCache.clearForScope('app-settings');
+    return this.getApiKeySettings();
   }
 
   async updateOidcConfig(config: Partial<OidcFullConfig>): Promise<OidcFullConfig> {
@@ -340,6 +391,8 @@ export class AppSettingsService {
       APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_LIBRARY_ID,
       APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_FOLDER_ID,
       APP_SETTING_KEYS.BOOK_DOCK_AUTO_FINALIZE_METADATA_MODE,
+      APP_SETTING_KEYS.BOOK_DOCK_UNSORTED_AUTO_JOIN,
+      APP_SETTING_KEYS.BOOK_DOCK_UNSORTED_KEEP_ORIGINAL,
     ];
     const rows = await this.repo.findMany(keys);
     const map = new Map(rows.map((r) => [r.key, r.value]));

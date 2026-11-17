@@ -8,7 +8,7 @@ import {
   IN_FLIGHT_BOOK_REQUEST_DOWNLOAD_STATUSES,
   UNSETTLED_BOOK_REQUEST_DOWNLOAD_STATUSES,
 } from '@bookorbit/types';
-import type { BookRequestDownloadStatus, IndexerColor } from '@bookorbit/types';
+import type { BookRequestDownloadStatus, DownloadClientType, IndexerColor } from '@bookorbit/types';
 
 import { DB } from '../../../db';
 import * as schema from '../../../db/schema';
@@ -42,6 +42,7 @@ export interface BookRequestDownloadJoinedRow {
   download: BookRequestDownloadRow;
   downloadClientName: string | null;
   downloadClientColor: IndexerColor | null;
+  downloadClientAdapterType: DownloadClientType | null;
   /** Null once the indexer row is gone, or for a magnet somebody pasted by hand. */
   indexerName: string | null;
   indexerColor: IndexerColor | null;
@@ -117,7 +118,7 @@ export class BookRequestDownloadRepository {
   async failInFlightForRequest(requestId: number, reason: string): Promise<number> {
     const rows = await this.db
       .update(bookRequestDownloads)
-      .set({ status: 'failed', errorMessage: reason })
+      .set({ status: 'failed', errorMessage: reason, failureCode: 'removed' })
       .where(and(eq(bookRequestDownloads.requestId, requestId), inArray(bookRequestDownloads.status, [...IN_FLIGHT_BOOK_REQUEST_DOWNLOAD_STATUSES])))
       .returning({ id: bookRequestDownloads.id });
     return rows.length;
@@ -262,7 +263,7 @@ export class BookRequestDownloadRepository {
       return await this.db.transaction(async (tx) => {
         const [download] = await tx
           .update(bookRequestDownloads)
-          .set({ ...data, downloadClientId: clientId, errorMessage: null })
+          .set({ ...data, downloadClientId: clientId, errorMessage: null, failureCode: null })
           .where(
             and(eq(bookRequestDownloads.id, downloadId), eq(bookRequestDownloads.clientKey, clientKey), eq(bookRequestDownloads.status, 'failed')),
           )
@@ -378,6 +379,7 @@ export class BookRequestDownloadRepository {
         download: bookRequestDownloads,
         downloadClientName: downloadClients.name,
         downloadClientColor: downloadClients.color,
+        downloadClientAdapterType: downloadClients.adapterType,
         indexerName: sql<string | null>`coalesce(${requestIndexers.managerMetadata}->>'displayName', ${requestIndexers.name})`,
         indexerColor: requestIndexers.color,
       })
@@ -401,6 +403,7 @@ export class BookRequestDownloadRepository {
         download: bookRequestDownloads,
         downloadClientName: downloadClients.name,
         downloadClientColor: downloadClients.color,
+        downloadClientAdapterType: downloadClients.adapterType,
         indexerName: sql<string | null>`coalesce(${requestIndexers.managerMetadata}->>'displayName', ${requestIndexers.name})`,
         indexerColor: requestIndexers.color,
       })

@@ -248,7 +248,7 @@ export class GeneratedBookFileService {
   private async loadBook(bookId: number, user: RequestUser) {
     const book = await this.repository.findBookPlacement(bookId);
     if (!book) throw new NotFoundException(`Book ${bookId} not found`);
-    await this.libraryService.verifyUserAccess(user.id, book.libraryId, user.isSuperuser);
+    await this.libraryService.verifyAccess(user, book.libraryId);
     if (book.organizationMode === 'book_per_file') {
       throw new GeneratedFileError('not_allowed', 'Single-file libraries cannot hold more than one file per book');
     }
@@ -305,7 +305,13 @@ export class GeneratedBookFileService {
     await rm(partial, { force: true });
     try {
       const input = await open(source.sourcePath, constants.O_RDONLY | NO_FOLLOW);
-      await pipeline(input.createReadStream(), createWriteStream(partial, { flags: 'wx', flush: true }));
+      try {
+        await pipeline(input.createReadStream(), createWriteStream(partial, { flags: 'wx', flush: true }));
+      } finally {
+        // The read stream only closes the handle once it ends or is destroyed; a failure before then would leave
+        // the descriptor open until garbage collection, which Node now reports as an uncaught error.
+        await input.close().catch(() => undefined);
+      }
     } catch (error) {
       await rm(partial, { force: true }).catch(() => undefined);
       throw error;

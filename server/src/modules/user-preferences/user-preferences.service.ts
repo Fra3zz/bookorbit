@@ -20,6 +20,7 @@ import {
   RETIRED_BOOK_REQUEST_PREFERENCE_FIELDS,
   DEFAULT_COVER_SEARCH_PROVIDER,
   FONT_FAMILY_NAME_MAX_LENGTH,
+  FORMAT_BADGE_STYLES,
   GLOW_REACH_MAX,
   GLOW_REACH_MIN,
   GRID_CARD_LABEL_FIELDS,
@@ -75,6 +76,7 @@ const DISPLAY_PREFERENCES_SCHEMA = z
     squareGridGap: z.number().int().min(1).max(80),
     viewMode: z.enum(BOOK_VIEW_MODES),
     cardOverlays: z.array(z.enum(CARD_OVERLAY_KEYS)),
+    formatBadgeStyle: z.enum(FORMAT_BADGE_STYLES).default('underline'),
     showJumpRails: z.boolean().default(true),
     smartScopeFilterExpanded: z.boolean(),
     authorCoverSize: z.number().int().min(100).max(400),
@@ -92,7 +94,8 @@ const DISPLAY_PREFERENCES_SCHEMA = z
     gridCardPrimaryLabel: z.enum(GRID_CARD_LABEL_FIELDS).default('hidden'),
     gridCardSecondaryLabel: z.enum(GRID_CARD_LABEL_FIELDS).default('hidden'),
     cardInfoMode: z.enum(CARD_INFO_MODES).default('hover-overlay'),
-    thumbnailClickAction: z.enum(BOOK_THUMBNAIL_CLICK_ACTION).default('reader'),
+    thumbnailClickAction: z.enum(BOOK_THUMBNAIL_CLICK_ACTION).default('details'),
+    openHighlightsInPeek: z.boolean().default(false),
     placeholderCoverStyle: z.enum(PLACEHOLDER_COVER_STYLES).default('bauhaus'),
   })
   .strict()

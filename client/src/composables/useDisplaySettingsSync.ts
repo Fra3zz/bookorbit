@@ -109,6 +109,7 @@ export function initDisplaySettingsSync(): void {
         settings.squareGridGap.value,
         settings.viewMode.value,
         settings.cardOverlays.value.join('\u0000'),
+        settings.formatBadgeStyle.value,
         settings.showJumpRails.value,
         settings.smartScopeFilterExpanded.value,
         settings.authorCoverSize.value,
@@ -127,6 +128,7 @@ export function initDisplaySettingsSync(): void {
         settings.gridCardSecondaryLabel.value,
         settings.cardInfoMode.value,
         settings.thumbnailClickAction.value,
+        settings.openHighlightsInPeek.value,
         settings.placeholderCoverStyle.value,
       ] as const,
     () => {

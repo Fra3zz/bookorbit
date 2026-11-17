@@ -35,6 +35,7 @@ import {
   TestConnectionDto,
   UpdateKoreaderDeviceDto,
   UpdateKoreaderDeviceFilePatternDto,
+  UpdateKoreaderDeviceNameDto,
   UpdateKoreaderFilePatternDto,
   UpdateKoreaderManualHashLinkDto,
   UpdateKoreaderUserDto,
@@ -162,6 +163,20 @@ export class KoreaderController {
   }
 
   @RequirePermission(Permission.KoreaderSync)
+  @Put('devices/:deviceId/name')
+  async setDeviceName(@CurrentUser() user: RequestUser, @Param() params: KoreaderDeviceParamDto, @Body() dto: UpdateKoreaderDeviceNameDto) {
+    await this.koreaderService.setDeviceName(user.id, params.deviceId, dto.name);
+    return { deviceId: params.deviceId, name: dto.name };
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Delete('devices/:deviceId/name')
+  async clearDeviceName(@CurrentUser() user: RequestUser, @Param() params: KoreaderDeviceParamDto) {
+    await this.koreaderService.setDeviceName(user.id, params.deviceId, null);
+    return { success: true };
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
   @Delete('devices/:deviceId')
   async removeDevice(@CurrentUser() user: RequestUser, @Param() params: KoreaderDeviceParamDto) {
     await this.koreaderService.removeDevice(user.id, params.deviceId);
@@ -219,13 +234,13 @@ export class KoreaderController {
   @RequirePermission(Permission.KoreaderSync)
   @Get('books/:bookId/progress')
   getBookProgress(@CurrentUser() user: RequestUser, @Param('bookId', ParseIntPipe) bookId: number) {
-    return this.koreaderService.getBookProgress(user.id, bookId);
+    return this.koreaderService.getBookProgress(user, bookId);
   }
 
   @RequirePermission(Permission.KoreaderSync)
   @Post('books/:bookId/reset-hold/release')
   async releaseResetHold(@CurrentUser() user: RequestUser, @Param('bookId', ParseIntPipe) bookId: number, @Body() dto: ReleaseResetHoldDto) {
-    await this.koreaderService.releaseResetHold(user.id, bookId, dto.deviceId);
+    await this.koreaderService.releaseResetHold(user, bookId, dto.deviceId);
     return { released: true };
   }
 

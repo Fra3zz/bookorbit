@@ -1,11 +1,15 @@
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
 import { BadRequestException, ForbiddenException, HttpException, HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES,
   ACTIVE_BOOK_REQUEST_STATUSES,
   BOOK_REQUEST_ACTION_ERROR_CODES,
+  BOOK_REQUEST_LIST_VIEWS,
   BOOK_REQUEST_MEDIA_KINDS,
+  BOOK_REQUEST_SELECT_ALL_LIMIT,
   BOOK_REQUEST_STATUSES,
   BOOK_REQUEST_SUBMIT_ERROR_CODES,
+  BOOK_REQUEST_VIEW_STATUSES,
   CANCELLABLE_BOOK_REQUEST_STATUSES,
   emptyResolvedRequestDestinations,
   NO_RESOLVED_REQUEST_DESTINATION,
@@ -28,6 +32,7 @@ import type {
   BookRequestFailureMeta,
   BookRequestSubmitErrorCode,
   BookRequestItem,
+  BookRequestListView,
   BookRequestMediaKind,
   BookRequestMetadataSource,
   BookRequestPage,
@@ -37,8 +42,11 @@ import type {
   BookRequestSubmitResult,
   BookRequestBulkFailure,
   BookRequestBulkResult,
+  BookRequestSelection,
+  BookRequestSelectionEntry,
   BookRequestSourceStatus,
   BookRequestSummary,
+  BookRequestViewCounts,
   LegacyBookRequestMediaKind,
   ResolvedRequestDestination,
   ResolvedRequestDestinations,
@@ -47,17 +55,24 @@ import type {
 import { StatsCache } from '../../common/cache/stats-cache';
 import { isUniqueViolation } from '../../common/utils/db-error.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import type { RequestUser } from '../../common/types/request-user';
+import { principalCacheKey, type RequestUser } from '../../common/types/request-user';
 import type { BookRequestRow, NewBookRequestRow } from '../../db/schema';
 import { LibraryService } from '../library/library.service';
 import { BookRequestAttributionService } from './book-request-attribution.service';
 import { BookRequestDedupeService, dedupeKeyCandidates, primaryDedupeKey, type WorkIdentity } from './book-request-dedupe.service';
 import { BookRequestGateway } from './book-request.gateway';
 import { BookRequestNotifier } from './book-request-notifier.service';
-import { mapBookRequestRow } from './book-request.mapper';
+import { downloadAlwaysDeletesRemote, mapBookRequestRow } from './book-request.mapper';
 import { BookRequestDownloadRepository } from './fulfillment/book-request-download.repository';
 import { DownloadRemovalService } from './fulfillment/download-removal.service';
-import { BookRequestRepository, type BookPlacement, type BookRequestJoinedRow, type BookRequestListRow } from './book-request.repository';
+import {
+  BookRequestRepository,
+  type BookPlacement,
+  type BookRequestJoinedRow,
+  type BookRequestListRow,
+  type BookRequestSelectionRequest,
+  type RequestListFilters,
+} from './book-request.repository';
 import { RequestAutomationService } from './fulfillment/request-automation.service';
 import { RequestCompanionService } from './fulfillment/request-companion.service';
 import { RETIRED_MEDIUM_REFUSAL } from './retired-media';
@@ -147,6 +162,21 @@ function actionForbidden(errorCode: BookRequestActionErrorCode, message: string,
   return new ForbiddenException({ message, errorCode, ...(errorMeta ? { errorMeta } : {}), statusCode: HttpStatus.FORBIDDEN });
 }
 
+/**
+ * A list's filters with one view applied. Without a view the list is exactly what it was before
+ * views existed; with one, the view alone decides whether the viewer's hidden rows are included.
+ */
+function withView(
+  filters: RequestListFilters,
+  viewerId: number,
+  view: BookRequestListView | undefined,
+  includeDismissed: boolean | undefined,
+): RequestListFilters {
+  if (view === undefined) return { ...filters, excludeDismissedFor: includeDismissed ? undefined : viewerId };
+  if (view === 'hidden') return { ...filters, onlyDismissedFor: viewerId };
+  return { ...filters, statuses: BOOK_REQUEST_VIEW_STATUSES[view], excludeDismissedFor: viewerId };
+}
+
 /** What one medium of a submission decides for itself; the work is shared. */
 interface SubmitHalf {
   mediaKind: BookRequestMediaKind;
@@ -222,6 +252,7 @@ export class BookRequestService {
     private readonly attribution: BookRequestAttributionService,
     private readonly indexers: IndexerConfigService,
     private readonly companions: RequestCompanionService,
+    private readonly libraryScope: LibraryScopeService,
   ) {}
 
   canManageAll(user: RequestUser): boolean {
@@ -243,7 +274,7 @@ export class BookRequestService {
    * instance with hundreds of libraries.
    */
   private async reachableLibraryIds(user: RequestUser): Promise<number[] | null> {
-    return user.isSuperuser ? null : this.libraryService.findAccessibleLibraryIds(user);
+    return this.libraryScope.visibleIdsOrAll(user);
   }
 
   /**
@@ -786,7 +817,7 @@ export class BookRequestService {
   private async resolveRequestedLibrary(targetLibraryId: number | null, user: RequestUser): Promise<number | null> {
     if (targetLibraryId === null) return null;
     try {
-      await this.libraryService.verifyUserAccess(user.id, targetLibraryId, user.isSuperuser);
+      await this.libraryService.verifyAccess(user, targetLibraryId);
     } catch (error) {
       // The rule belongs to the library service; only the sentence is ours, and the form has to be
       // able to translate this the way it translates every other reason a submission is refused.
@@ -835,13 +866,9 @@ export class BookRequestService {
 
   async listMine(dto: ListBookRequestsDto, user: RequestUser): Promise<BookRequestPage> {
     const { items, total } = await this.repo.findAll({
+      ...withView(this.mineFilters(dto, user), user.id, dto.view, dto.includeDismissed),
       page: dto.page ?? 1,
       limit: dto.limit ?? 20,
-      status: dto.status,
-      mediaKind: dto.mediaKind,
-      userId: user.id,
-      selfServe: dto.selfServe,
-      excludeDismissedFor: dto.includeDismissed ? undefined : user.id,
       sortBy: dto.sortBy,
       sortDir: dto.sortDir,
       groupPairs: dto.groupPairs,
@@ -852,18 +879,90 @@ export class BookRequestService {
   async listAll(dto: ListAllBookRequestsDto, user: RequestUser): Promise<BookRequestPage> {
     if (!this.canManageAll(user)) throw new ForbiddenException('You cannot view all book requests');
     const { items, total } = await this.repo.findAll({
+      ...withView(this.allFilters(dto), user.id, dto.view, dto.includeDismissed),
       page: dto.page ?? 1,
       limit: dto.limit ?? 20,
-      status: dto.status,
-      mediaKind: dto.mediaKind,
-      requesterUserId: dto.requesterUserId,
-      selfServe: dto.selfServe,
-      excludeDismissedFor: dto.includeDismissed ? undefined : user.id,
       sortBy: dto.sortBy,
       sortDir: dto.sortDir,
       groupPairs: dto.groupPairs,
     });
     return { items: await this.toListItems(items, user.id, dto.groupPairs === true), total };
+  }
+
+  async getMineViewCounts(dto: ListBookRequestsDto, user: RequestUser): Promise<BookRequestViewCounts> {
+    return this.countViews(this.mineFilters(dto, user), user.id);
+  }
+
+  async getAllViewCounts(dto: ListAllBookRequestsDto, user: RequestUser): Promise<BookRequestViewCounts> {
+    if (!this.canManageAll(user)) throw new ForbiddenException('You cannot view all book requests');
+    return this.countViews(this.allFilters(dto), user.id);
+  }
+
+  async selectMine(dto: ListBookRequestsDto, user: RequestUser): Promise<BookRequestSelection> {
+    return this.selectMatching(withView(this.mineFilters(dto, user), user.id, dto.view, dto.includeDismissed), dto, user.id);
+  }
+
+  async selectAll(dto: ListAllBookRequestsDto, user: RequestUser): Promise<BookRequestSelection> {
+    if (!this.canManageAll(user)) throw new ForbiddenException('You cannot view all book requests');
+    return this.selectMatching(withView(this.allFilters(dto), user.id, dto.view, dto.includeDismissed), dto, user.id);
+  }
+
+  /** The personal list: what the caller asked for or follows, narrowed by what they filtered on. */
+  private mineFilters(dto: ListBookRequestsDto, user: RequestUser): RequestListFilters {
+    return { status: dto.status, mediaKind: dto.mediaKind, selfServe: dto.selfServe, search: dto.q, userId: user.id };
+  }
+
+  /** The approver queue: everybody's requests, narrowed by what the approver filtered on. */
+  private allFilters(dto: ListAllBookRequestsDto): RequestListFilters {
+    return { status: dto.status, mediaKind: dto.mediaKind, selfServe: dto.selfServe, search: dto.q, requesterUserId: dto.requesterUserId };
+  }
+
+  /**
+   * One count per view, each the total the grouped list would report for that view under the same
+   * filters. Read in parallel, and through the same where clause the list is built from.
+   */
+  private async countViews(filters: RequestListFilters, viewerId: number): Promise<BookRequestViewCounts> {
+    const unhidden: RequestListFilters = { ...filters, excludeDismissedFor: viewerId };
+    const [active, awaitingManualPick, ...perView] = await Promise.all([
+      this.repo.countRows(unhidden),
+      this.repo.countRows({ ...unhidden, statuses: ['approved'], failureCode: 'AUTOMATION_DISABLED' }),
+      ...BOOK_REQUEST_LIST_VIEWS.map((view) => this.repo.countRows(withView(filters, viewerId, view, undefined))),
+    ]);
+    const byView = Object.fromEntries(BOOK_REQUEST_LIST_VIEWS.map((view, index) => [view, perView[index] ?? 0])) as Record<
+      BookRequestListView,
+      number
+    >;
+    return { active, ...byView, awaitingManualPick };
+  }
+
+  /**
+   * "Select all matching": every request in the first rows of the grouped list, in list order. A
+   * pair's companion is reported alongside its lead and under the lead's row, because that is the
+   * row a selection on the page holds it by.
+   */
+  private async selectMatching(
+    filters: RequestListFilters,
+    dto: Pick<ListBookRequestsDto, 'sortBy' | 'sortDir'>,
+    viewerId: number,
+  ): Promise<BookRequestSelection> {
+    const { rows, totalRows } = await this.repo.findSelection(
+      { ...filters, sortBy: dto.sortBy, sortDir: dto.sortDir },
+      viewerId,
+      BOOK_REQUEST_SELECT_ALL_LIMIT,
+    );
+    const entry = (request: BookRequestSelectionRequest, rowId: number): BookRequestSelectionEntry => ({
+      id: request.id,
+      rowId,
+      title: request.title,
+      mediaKind: request.mediaKind as BookRequestMediaKind,
+      status: request.status as BookRequestStatus,
+      userId: request.userId,
+      fulfillerUserId: request.fulfillerUserId,
+      dismissed: request.dismissed,
+      subscribed: request.subscribed && request.userId !== viewerId,
+    });
+    const items = rows.flatMap(({ lead, companion }) => (companion ? [entry(lead, lead.id), entry(companion, lead.id)] : [entry(lead, lead.id)]));
+    return { items, totalRows, truncated: totalRows > BOOK_REQUEST_SELECT_ALL_LIMIT };
   }
 
   listRequesterOptions(dto: ListRequesterOptionsDto): Promise<BookRequestRequesterOption[]> {
@@ -906,7 +1005,7 @@ export class BookRequestService {
    * started, or correct the language the picker is matching against, has taken on work they can
    * only run forwards.
    */
-  private canDrive(request: BookRequestRow, user: RequestUser): boolean {
+  canDrive(request: Pick<BookRequestRow, 'userId' | 'fulfillerUserId'>, user: RequestUser): boolean {
     if (request.userId === user.id || this.canManageAll(user)) return true;
     return this.canSelfFulfil(user) && isBookRequestFulfiller(request, user.id);
   }
@@ -928,14 +1027,15 @@ export class BookRequestService {
 
   /**
    * Stop, at any point before the request has settled. A request that is mid-download is stopped
-   * at its transfer handler too. Torrent data is kept because an import may hardlink from it;
+   * at its transfer handler too. Torrent data is kept because an import may hardlink from it, and a
+   * torrent that already finished is left seeding unless the caller asked for its files to go;
    * partial direct-download staging has no reuse and is deleted.
    *
    * The removal is best-effort on purpose. A download client that is unreachable must not be the
    * reason a stuck request stays stuck, so the cancellation stands either way and the request
    * carries a note that a transfer may still be sitting in the client.
    */
-  async cancel(id: number, user: RequestUser): Promise<BookRequestItem> {
+  async cancel(id: number, user: RequestUser, deleteFiles = false): Promise<BookRequestItem> {
     const joined = await this.repo.findById(id);
     if (!joined) throw new NotFoundException('Book request not found');
 
@@ -960,7 +1060,7 @@ export class BookRequestService {
     });
     if (!updated) throw await this.staleLifecycleTransition(id, 'cancel');
 
-    const outcome = await this.removal.removeLatestForRequest(id, false, user.username);
+    const outcome = await this.removal.removeLatestForRequest(id, deleteFiles, user.username);
     // The cancellation stands either way; the note is what tells the requester a transfer may
     // still be sitting in the client. Conditional, so it cannot resurrect a row a delete removed.
     if (outcome.error) {
@@ -982,7 +1082,7 @@ export class BookRequestService {
    * This is intentionally separate from `cancel`: the request, its subscribers, and its approval
    * remain intact.
    */
-  async cancelDownload(id: number, downloadId: number, user: RequestUser): Promise<BookRequestItem> {
+  async cancelDownload(id: number, downloadId: number, user: RequestUser, deleteFiles = false): Promise<BookRequestItem> {
     const joined = await this.repo.findById(id);
     if (!joined) throw new NotFoundException('Book request not found');
     if (!this.canDrive(joined.request, user)) throw new ForbiddenException('You cannot cancel this book request download');
@@ -993,7 +1093,7 @@ export class BookRequestService {
       throw new BadRequestException(`A download that is ${download.status} can no longer be cancelled`);
     }
 
-    const stopped = await this.removal.removeAttempt(id, downloadId, false, user.username);
+    const stopped = await this.removal.removeAttempt(id, downloadId, deleteFiles, user.username);
     if (!stopped) throw new BadRequestException('The download finished before it could be cancelled');
 
     await this.repo.updateIf(id, ACTIVE_TRANSFER_REQUEST_STATUSES, { status: 'approved', statusReason: null });
@@ -1070,11 +1170,12 @@ export class BookRequestService {
    * who decided goes with them, which is why this is a moderator action and dismissal is what
    * everyone else gets.
    *
-   * A settled request can still own client state, especially a torrent that keeps seeding after
-   * import, so the attempt is detached first. Deleting the row before that would leave client work
-   * with nothing pointing at it. Torrent files are kept; direct-download staging is disposable.
+   * A settled request can still own client state, so the attempt is detached first: deleting the
+   * row before that would leave a running transfer with nothing pointing at it. A finished torrent
+   * is the exception. Without consent to delete its files it is left seeding, and the client, not
+   * BookOrbit, owns it from then on. Direct-download staging is disposable.
    */
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, deleteFiles = false): Promise<void> {
     const joined = await this.repo.findById(id);
     if (!joined) throw new NotFoundException('Book request not found');
     if (!this.canManageAll(user)) throw new ForbiddenException('You cannot delete book requests');
@@ -1090,7 +1191,7 @@ export class BookRequestService {
       throw await this.staleTransition(id, (status) => `A request that is ${status} is still being worked on; cancel it before deleting it`);
     }
 
-    const outcome = await this.removal.removeLatestForRequest(id, false, user.username);
+    const outcome = await this.removal.removeLatestForRequest(id, deleteFiles, user.username);
     if (outcome.error) {
       if (reservedFailed) await this.repo.updateIf(id, ['cancelled'], { status: 'failed' });
       throw new BadRequestException(`Remove the download from its client first: ${outcome.error}`);
@@ -1124,7 +1225,7 @@ export class BookRequestService {
     // The approver may reroute, but only somewhere they can reach themselves.
     let targetLibraryId = joined.request.targetLibraryId;
     if (dto.targetLibraryId !== undefined && dto.targetLibraryId !== null) {
-      await this.libraryService.verifyUserAccess(user.id, dto.targetLibraryId, user.isSuperuser);
+      await this.libraryService.verifyAccess(user, dto.targetLibraryId);
       targetLibraryId = dto.targetLibraryId;
     }
 
@@ -1187,24 +1288,32 @@ export class BookRequestService {
    * from the other side. Nothing is rolled back on a failure either, because an approval that has
    * already reached automation cannot be taken back cleanly; the caller is told which ids fell out
    * instead.
+   *
+   * An action that takes the request off the caller's list has no item to report, so its `run`
+   * resolves to null and the id lands in `removed`. Only those actions report `removed` at all; the
+   * ones that existed before it keep the two-list answer released clients decode.
    */
   private async runBulk(
     event: string,
     ids: number[],
     user: RequestUser,
     fallbackReason: string,
-    run: (id: number) => Promise<BookRequestItem>,
+    run: (id: number) => Promise<BookRequestItem | null>,
+    options: { reportsRemoved?: boolean } = {},
   ): Promise<BookRequestBulkResult> {
     const startedAt = Date.now();
     this.logger.log(`[${event}] [start] userId=${user.id} count=${ids.length} - applying an action to a selection of book requests`);
 
     const updated: BookRequestItem[] = [];
+    const removed: number[] = [];
     const failed: BookRequestBulkFailure[] = [];
 
     for (const id of ids) {
       const itemStartedAt = Date.now();
       try {
-        updated.push(await run(id));
+        const item = await run(id);
+        if (item === null) removed.push(id);
+        else updated.push(item);
       } catch (error) {
         // An HttpException is this service refusing on a rule it states, and the reason is the
         // sentence the operator reads. Anything else is a defect, and folding it into the same
@@ -1229,10 +1338,10 @@ export class BookRequestService {
     }
 
     this.logger.log(
-      `[${event}] [end] userId=${user.id} updated=${updated.length} failed=${failed.length} durationMs=${Date.now() - startedAt} - selection applied`,
+      `[${event}] [end] userId=${user.id} updated=${updated.length} removed=${removed.length} failed=${failed.length} durationMs=${Date.now() - startedAt} - selection applied`,
     );
 
-    return { updated, failed };
+    return options.reportsRemoved ? { updated, failed, removed } : { updated, failed };
   }
 
   async approveMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
@@ -1255,6 +1364,63 @@ export class BookRequestService {
   /** Hiding is personal, so this needs no moderator permission and touches nobody else's list. */
   async dismissMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
     return this.runBulk('book_request.dismiss_many', [...new Set(dto.ids)], user, 'Could not hide that request', (id) => this.dismiss(id, user));
+  }
+
+  /**
+   * Cancelling a selection. Each request's files are deleted exactly when cancelling that one row
+   * from the page would delete them: only where its client always removes the data with the
+   * transfer, so the bulk action never deletes more than the single one would have.
+   */
+  async cancelMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
+    const ids = [...new Set(dto.ids)];
+    const deletesRemote = await this.remoteDeletingRequestIds(ids);
+    return this.runBulk('book_request.cancel_many', ids, user, 'Could not cancel that request', (id) => this.cancel(id, user, deletesRemote.has(id)));
+  }
+
+  async restoreMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
+    return this.runBulk('book_request.restore_many', [...new Set(dto.ids)], user, 'Could not restore that request', (id) => this.restore(id, user));
+  }
+
+  /** Leaving a selection of requests somebody else made. Each one leaves the caller's list. */
+  async leaveMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
+    return this.runBulk(
+      'book_request.leave_many',
+      [...new Set(dto.ids)],
+      user,
+      'Could not leave that request',
+      async (id) => {
+        await this.unsubscribe(id, user);
+        return null;
+      },
+      { reportsRemoved: true },
+    );
+  }
+
+  /** Deleting a selection, with the same file rule `cancelMany` applies. */
+  async removeMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
+    const ids = [...new Set(dto.ids)];
+    const deletesRemote = await this.remoteDeletingRequestIds(ids);
+    return this.runBulk(
+      'book_request.delete_many',
+      ids,
+      user,
+      'Could not delete that request',
+      async (id) => {
+        await this.remove(id, user, deletesRemote.has(id));
+        return null;
+      },
+      { reportsRemoved: true },
+    );
+  }
+
+  /**
+   * The requests whose latest attempt sits with a client that always deletes the data along with
+   * the transfer, read in one batch. The same test the request's own `download.alwaysDeletesRemote`
+   * answers, which is what the page consults before a single cancel or delete.
+   */
+  private async remoteDeletingRequestIds(ids: number[]): Promise<Set<number>> {
+    const latest = await this.downloads.findLatestForRequests(ids);
+    return new Set([...latest].filter(([, download]) => downloadAlwaysDeletesRemote(download)).map(([id]) => id));
   }
 
   /**
@@ -1316,7 +1482,7 @@ export class BookRequestService {
       throw new BadRequestException(`A ${joined.request.status} request cannot be fulfilled`);
     }
     if (dto.matchedBookId == null && dto.bookDockFileId == null) {
-      throw new BadRequestException('Provide either a book or a Book Dock file to close the request');
+      throw new BadRequestException('Provide either a book or a Library Dock file to close the request');
     }
 
     // Scoped to what this actor can reach, not merely to what exists. `ManageBookRequests` says
@@ -1327,11 +1493,12 @@ export class BookRequestService {
       throw new BadRequestException('That book no longer exists');
     }
     if (dto.bookDockFileId != null && !(await this.repo.bookDockFileExists(dto.bookDockFileId, this.dockUploaderScope(user)))) {
-      throw new BadRequestException('That Book Dock file no longer exists');
+      throw new BadRequestException('That Library Dock file no longer exists');
     }
 
     // Before the transition, like cancel and delete: the person has the book already, so a transfer
-    // still running is work nothing will ever use. Detaching it after the row settled would leave
+    // still running is work nothing will ever use. A finished torrent is a seed, not unused work,
+    // and the removal leaves it in the client. Detaching after the row settled would leave
     // a window where the poll loop still owns an attempt against a filed request; leaving it out
     // altogether, as this used to, left a mid-download torrent running in the client with nothing
     // in BookOrbit pointing at it. Best-effort, so a client that is down cannot block the filing.
@@ -1380,12 +1547,14 @@ export class BookRequestService {
   }
 
   async checkAvailability(queries: BookRequestAvailabilityQuery[], user: RequestUser): Promise<BookRequestAvailability[]> {
-    const libraryIds = user.isSuperuser ? null : await this.libraryService.findAccessibleLibraryIds(user);
+    const libraryIds = await this.libraryScope.visibleIdsOrAll(user);
     return this.dedupe.checkAvailability(queries, user.id, libraryIds);
   }
 
   getSummary(user: RequestUser): Promise<BookRequestSummary> {
-    return this.summaryCache.get('book-request-summary', `${user.id}:${this.gateway.changeVersion}`, () => this.loadSummary(user));
+    return this.summaryCache.get('book-request-summary', principalCacheKey(user, `${user.id}:${this.gateway.changeVersion}`), () =>
+      this.loadSummary(user),
+    );
   }
 
   private async loadSummary(user: RequestUser): Promise<BookRequestSummary> {

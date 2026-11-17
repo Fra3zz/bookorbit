@@ -2,15 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { RegexMetadataService } from '../metadata/regex/regex-metadata.service';
 import { RegexMetadataPreviewDto, RegexMetadataValidationDto } from './dto/regex-metadata.dto';
 import { ReadingAttemptEventsService } from '../user-book-status/reading-attempt-events.service';
-import {
-  BadRequestException,
-  ConflictException,
-  ForbiddenException,
-  Injectable,
-  InternalServerErrorException,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { readdir, rm, stat } from 'fs/promises';
 import { join } from 'path';
@@ -24,9 +16,11 @@ import type {
   RegexMetadataConfig,
   WriteResult,
 } from '@bookorbit/types';
+import { LibraryOperationGate } from '../../common/services/library-operation-gate.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { normalizeIconValue } from '../../common/utils/icon-value.utils';
-import type { RequestUser } from '../../common/types/request-user';
+import { LibraryScopeService, type LibraryScopeSubject } from '../../common/library-scope/library-scope.service';
+import { apiKeyCredentialOf, type RequestUser } from '../../common/types/request-user';
 import type { LibraryFolder } from '../../db/schema/libraries';
 import { AchievementEventsService, ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
 import { FileWriteService } from '../file-write/file-write.service';
@@ -43,9 +37,9 @@ import {
   DEFAULT_LIBRARY_ADDED_AT_SOURCE,
   DEFAULT_LIBRARY_COVER_ASPECT_RATIO,
   DEFAULT_LIBRARY_ORGANIZATION_MODE,
-  EDITOR_ACCESS_LEVELS,
   LIBRARY_METADATA_PRECEDENCE_DEFAULT,
 } from './library.constants';
+import { LibraryLifecycleService } from './library-lifecycle.service';
 import { LibraryRepository } from './library.repository';
 import { LibraryScanSchedulerService } from './library-scan-scheduler.service';
 
@@ -78,28 +72,23 @@ export class LibraryService {
     private readonly scanScheduler: LibraryScanSchedulerService,
     private readonly regexMetadata: RegexMetadataService,
     private readonly readingAttemptEvents: ReadingAttemptEventsService,
+    private readonly libraryGate: LibraryOperationGate,
+    private readonly libraryScope: LibraryScopeService,
+    private readonly lifecycle: LibraryLifecycleService,
   ) {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
 
-  async verifyUserAccess(userId: number, libraryId: number, isSuperuser: boolean): Promise<void> {
-    if (isSuperuser) return;
-    const hasAccess = await this.libraryRepo.hasUserAccess(userId, libraryId);
-    if (!hasAccess) throw new ForbiddenException('No access to this library');
+  async verifyAccess(user: LibraryScopeSubject, libraryId: number): Promise<void> {
+    await this.libraryScope.assertVisible(user, libraryId);
   }
 
-  async verifyUserAccessLevel(userId: number, libraryId: number, isSuperuser: boolean, required: AccessLevel): Promise<void> {
-    if (isSuperuser) return;
-    const accessLevel = await this.libraryRepo.findUserAccessLevel(userId, libraryId);
-    const rank: Record<AccessLevel, number> = { viewer: 1, editor: 2, owner: 3 };
-    if (!accessLevel) throw new ForbiddenException('No access to this library');
-    if (rank[accessLevel] < rank[required]) throw new ForbiddenException('Insufficient library access level');
+  async verifyAccessLevel(user: LibraryScopeSubject, libraryId: number, required: AccessLevel): Promise<void> {
+    await this.libraryScope.assertLevel(user, libraryId, required);
   }
 
   async findAll(user: RequestUser) {
-    const librariesForUser = user.isSuperuser
-      ? await this.libraryRepo.findAll()
-      : await this.libraryRepo.findAllForUser(user.id, user.contentFilters);
+    const librariesForUser = await this.findLibrariesForUser(user);
     const folders = await this.libraryRepo.findFoldersByLibraryIds(librariesForUser.map((library) => library.id));
 
     const foldersByLibraryId = new Map<number, LibraryFolder[]>();
@@ -121,7 +110,7 @@ export class LibraryService {
   /**
    * Which of these users can open this library. Callers that hold user ids rather than whole
    * users - a notifier resolving one link per recipient, for instance - cannot ask
-   * `verifyUserAccess`, which needs the superuser flag handed to it.
+   * `verifyAccess`, which needs the requesting user.
    */
   async findUserIdsWithAccess(libraryId: number, userIds: number[]): Promise<Set<number>> {
     if (userIds.length === 0) return new Set();
@@ -130,15 +119,28 @@ export class LibraryService {
   }
 
   async findAccessibleLibraryIds(user: RequestUser): Promise<number[]> {
-    const ids = user.isSuperuser ? await this.libraryRepo.findAllIds() : await this.libraryRepo.findAccessibleIdsForUser(user.id);
-    return ids.map(({ id }) => id);
+    return this.libraryScope.visibleIds(user);
   }
 
   async findEditableLibraryIds(user: RequestUser): Promise<number[]> {
-    const ids = user.isSuperuser
-      ? await this.libraryRepo.findAllIds()
-      : await this.libraryRepo.findAccessibleIdsForUser(user.id, EDITOR_ACCESS_LEVELS);
-    return ids.map(({ id }) => id);
+    return this.libraryScope.editableIds(user);
+  }
+
+  /**
+   * Superusers list every library with no per-library level; everyone else lists their grants with
+   * book counts that respect their content filters. An API key narrows either list to the libraries
+   * it may reach, and a read-only key reports viewer wherever its owner holds more.
+   */
+  private async findLibrariesForUser(user: RequestUser) {
+    if (this.libraryScope.seesAllLibraries(user)) return this.libraryRepo.findAll();
+    const credential = apiKeyCredentialOf(user);
+    if (!credential) return this.libraryRepo.findAllForUser(user.id, user.contentFilters);
+    const levels = new Map((await this.libraryScope.visibleLevels(user)).map(({ id, accessLevel }) => [id, accessLevel]));
+    if (credential.ownerIsSuperuser) {
+      return (await this.libraryRepo.findAll()).filter((library) => levels.has(library.id));
+    }
+    const rows = await this.libraryRepo.findAllForUser(user.id, user.contentFilters);
+    return rows.filter((library) => levels.has(library.id)).map((library) => ({ ...library, accessLevel: levels.get(library.id)! }));
   }
 
   async findOne(id: number) {
@@ -168,6 +170,7 @@ export class LibraryService {
     await this.regexMetadata.validate(regexMetadata);
     await this.assertNameAvailable(dto.name);
     const folderPaths = await this.assertFolderPathsWithinBrowseRoot(dto.folders);
+    await this.assertFoldersDoNotOverlap(folderPaths);
     const icon = normalizeIconValue(dto.icon);
     if (!icon) {
       throw new BadRequestException('Icon is required');
@@ -211,6 +214,7 @@ export class LibraryService {
     });
 
     const folders = await this.libraryRepo.insertFolders(folderPaths.map((path) => ({ libraryId: library.id, path })));
+    this.scannerService.forgetLibraryRoots();
 
     if (library.watch) {
       await this.fileWatcherService.startWatcher(
@@ -254,6 +258,7 @@ export class LibraryService {
     if (!regexMetadataChanged) delete fields.regexMetadata;
     else fields.regexMetadata = incomingRegexMetadata;
     const folderPaths = rawFolderPaths === undefined ? undefined : await this.assertFolderPathsWithinBrowseRoot(rawFolderPaths);
+    if (folderPaths !== undefined) await this.assertFoldersDoNotOverlap(folderPaths, id);
     const icon = fields.icon !== undefined ? normalizeIconValue(fields.icon) : normalizeIconValue(existing.icon);
     if (!icon) {
       throw new BadRequestException('Icon is required');
@@ -271,12 +276,18 @@ export class LibraryService {
       const nextPaths = new Set(folderPaths);
 
       const toRemove = existingFolders.filter((f) => !nextPaths.has(f.path));
+      const afterFoldersRemoved = await this.lifecycle.prepareFoldersRemove(
+        id,
+        toRemove.map((f) => f.id),
+      );
       await Promise.all(toRemove.map((f) => this.libraryRepo.deleteFolder(f.id)));
+      await afterFoldersRemoved();
 
       const toAdd = folderPaths.filter((path) => !existingPaths.has(path));
       if (toAdd.length > 0) {
         await this.libraryRepo.insertFolders(toAdd.map((path) => ({ libraryId: id, path })));
       }
+      if (toRemove.length > 0 || toAdd.length > 0) this.scannerService.forgetLibraryRoots();
     }
 
     const folders = await this.libraryRepo.findFoldersByLibrary(id);
@@ -309,13 +320,25 @@ export class LibraryService {
   async remove(id: number) {
     const [existing] = await this.libraryRepo.findById(id);
     if (!existing) throw new NotFoundException('Library not found');
+    // Held for the whole delete, so a scan, move, rename or merge cannot start on rows and files
+    // that are going away, and one already running is not cut off halfway through its writes.
+    const releaseGate = this.libraryGate.tryAcquire(id, 'library_delete');
+    if (!releaseGate) {
+      throw new ConflictException({
+        message: 'Another operation is running in this library. Try again when it finishes.',
+        errorCode: 'LIBRARY_BUSY',
+      });
+    }
     const event = 'library.delete';
     const startedAt = Date.now();
     this.logger.log(`[${event}] [start] libraryId=${id} - library deletion started`);
     try {
       await this.fileWatcherService.stopWatcher(id);
       const bookRows = await this.libraryRepo.findBookIdsByLibrary(id);
+      const afterDelete = await this.lifecycle.prepareLibraryDelete({ id, name: existing.name });
       await this.libraryRepo.delete(id);
+      await afterDelete();
+      this.scannerService.forgetLibraryRoots();
       this.readingAttemptEvents.notifyChanged(null);
       this.scanScheduler.removeSchedule(id);
       await this.cleanupCoverDirectories(bookRows.map(({ id: bookId }) => bookId));
@@ -326,6 +349,8 @@ export class LibraryService {
         `[${event}] [fail] libraryId=${id} durationMs=${Date.now() - startedAt} errorClass=${error instanceof Error ? error.name : 'Error'} error="${sanitizeLogValue(message)}" - library deletion failed`,
       );
       throw error;
+    } finally {
+      releaseGate();
     }
   }
 
@@ -518,7 +543,37 @@ export class LibraryService {
   }
 
   private async assertFolderPathsWithinBrowseRoot(paths: string[]): Promise<string[]> {
-    return Promise.all(paths.map((path) => this.pathPolicy.assertWithinBrowseRoot(path)));
+    const resolved = await Promise.all(paths.map((path) => this.pathPolicy.assertWithinBrowseRoot(path)));
+    return [...new Set(resolved)];
+  }
+
+  /**
+   * A file can belong to one book in one library, so a folder this request adds may not sit inside
+   * another library folder, contain one, or repeat one, in this library or any other. Folders the
+   * library already has are not re-checked: a library saved before this rule keeps saving until an
+   * admin moves its folders apart, and the scanner settles who owns what in the meantime.
+   */
+  private async assertFoldersDoNotOverlap(paths: string[], libraryId?: number): Promise<void> {
+    const existing = await this.libraryRepo.findAllFolderPaths();
+    const current = new Set(existing.filter((folder) => folder.libraryId === libraryId).map((folder) => folder.path));
+    const otherLibraries = existing.filter((folder) => folder.libraryId !== libraryId);
+
+    for (const path of paths) {
+      if (current.has(path)) continue;
+      const inAnotherLibrary = otherLibraries.find((folder) => pathsOverlap(path, folder.path));
+      const inThisLibrary = paths.find((other) => other !== path && pathsOverlap(path, other));
+      if (!inAnotherLibrary && inThisLibrary === undefined) continue;
+      throw new ConflictException({
+        message: 'Library folders cannot sit inside one another or be shared between libraries.',
+        errorCode: 'LIBRARY_FOLDER_OVERLAP',
+        errorMeta: {
+          path,
+          overlapPath: inAnotherLibrary?.path ?? inThisLibrary,
+          ...(inAnotherLibrary ? { overlapLibrary: inAnotherLibrary.libraryName } : {}),
+        },
+      });
+    }
+    await this.lifecycle.assertFolderPathsAllowed(paths.filter((path) => !current.has(path)));
   }
 
   private async cleanupCoverDirectories(bookIds: number[]): Promise<void> {

@@ -12,13 +12,13 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { mkdtemp, rm, stat, rename } from 'fs/promises';
-import { inArray, type SQL } from 'drizzle-orm';
+import { and, inArray, type SQL } from 'drizzle-orm';
 
 import { MAX_BOOK_QUERY_OFFSET_ROWS, isBookQueryOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { chapterProvenance, normalizeAudiobookChapters, resolveStoredAudiobookChapters } from '../../common/utils/audiobook-chapters.utils';
 import { coverFetchInputs, resolveIsAudiobook, resolveSearchMediaKind } from '../../common/utils/book-media.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import { mapWithConcurrency } from '../../common/utils/batch.utils';
+import { chunk, mapWithConcurrency } from '../../common/utils/batch.utils';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { selectPrimaryFile } from '../../common/utils/primary-file-selection.utils';
 import { normalizeMetadataText, normalizeMetadataTextKey } from '../../common/utils/metadata-text-normalize.utils';
@@ -39,6 +39,7 @@ import { tmpdir } from 'os';
 
 import {
   BOOK_FILTER_FORMATS,
+  BOOK_MERGED_ERROR_CODE,
   BOOK_METADATA_LOCK_FIELDS,
   DEFAULT_DOWNLOAD_PATTERN,
   COVER_MEDIA,
@@ -57,6 +58,8 @@ import type {
   AccessLevel,
   AudiobookChapter,
   AudiobookChapterSource,
+  AudioCoverEmbedResult,
+  BookCard,
   BookCommunityRating,
   BookKoboState,
   BookMetadataRefreshPreviewFields,
@@ -83,7 +86,7 @@ import type {
   WriteResult,
   EpubMediaOverlayCapability,
 } from '@bookorbit/types';
-import type { ContentFilterRules } from '@bookorbit/types';
+import type { BookIsbnCandidates, ContentFilterRules, LinkedBookSummary } from '@bookorbit/types';
 import { assembleBookCards, assembleCollapsedBookCards } from './utils/assemble-book-cards';
 import type { RequestUser } from '../../common/types/request-user';
 import { UpdateBookFileDto } from './dto/update-book-file.dto';
@@ -120,6 +123,7 @@ import { AudiobookEbookProgressSyncService } from './audiobook-ebook-progress-sy
 import type { DeliveryArtifact } from './delivery-artifact.service';
 import { DeliverySelectionService } from './delivery-selection.service';
 import { AudiolessEpubService } from './audioless-epub.service';
+import { BookLinkMembersRepository, toLinkedBookSummary } from './book-link-members.repository';
 import { BookRepository } from './book.repository';
 import { ComicMetadataRepository } from '../metadata/comic-metadata.repository';
 import { CustomMetadataService } from '../custom-metadata/custom-metadata.service';
@@ -138,10 +142,13 @@ import type { UpdateBookMetadataAndLocksDto } from './dto/update-book-metadata-a
 import { buildBookDetailSupplementalFields } from './utils/build-book-detail-supplemental-fields';
 import type { SetStatusDto } from '../user-book-status/dto/set-status.dto';
 import { READING_DATE_ERROR_CODES } from '../user-book-status/user-book-status.constants';
+import { readEpubAudioTimelineSeconds } from '../reader/epub/epub-audio-timeline';
 import { inspectEpubMediaOverlayFields, mediaOverlayCapabilityFromFields } from '../reader/epub/epub-media-overlay-capability';
+import { readAloudDurationsMatch } from '../reader/epub/epub-media-overlay-timeline';
 import { computeFileHash } from '../scanner/lib/hash';
 import { compareCfi } from '../position-converter/cfi.utils';
 import { PositionConverterService } from '../position-converter/position-converter.service';
+import { BookAliasService } from '../book-alias/book-alias.service';
 
 type SeriesCollapseQueryOptions = {
   seriesSelectionFilter: GroupRule | undefined;
@@ -149,6 +156,8 @@ type SeriesCollapseQueryOptions = {
 
 type BookQueryExecutionOptions = Partial<SeriesCollapseQueryOptions> & {
   defaultCollectionId?: number;
+  /** Who the cards are for. When set, each card lists the linked books this user can see. */
+  viewer?: RequestUser;
 };
 
 const METADATA_UPDATE_FAILPOINTS = [
@@ -164,12 +173,25 @@ const METADATA_UPDATE_FAILPOINTS = [
 
 /** An explicit single-book refresh goes live; a provider that fails may still answer from the cache. */
 const EXPLICIT_REFRESH_DIRECTIVE: CacheDirective = { policy: 'refresh', allowFallback: true };
+/** The most ids one `IN` list takes on the bulk paths. */
+const BOOK_ID_QUERY_CHUNK = 1000;
+
+/** Why one book of a bulk run was passed over without being worked on. */
+export type BulkBookSkipCode = 'not-found' | 'no-access';
+
+export type BulkRefreshMetadataItem =
+  { status: 'success'; detail: BookDetailDto } | { status: 'failed'; error: string } | { status: 'skipped'; code: BulkBookSkipCode };
+
+/** `attempted`: at least one unlocked slot had an embedded source. `no-source` and `locked` write nothing. */
+export type BulkReExtractCoverItem =
+  { status: 'attempted'; updated: boolean } | { status: 'no-source' } | { status: 'locked' } | { status: 'skipped'; code: BulkBookSkipCode };
+
+export type BulkEmbedAudioCoverItem =
+  AudioCoverEmbedResult | { status: 'skipped'; code: BulkBookSkipCode; fieldsWritten: string[]; durationMs: number; reason: string };
 
 export type MetadataUpdateFailpoint = (typeof METADATA_UPDATE_FAILPOINTS)[number];
 export type ExportScope = 'primary' | 'all' | 'audio';
 
-const READ_ALOUD_MAX_DURATION_DIFF_RATIO = 0.05;
-const READ_ALOUD_MAX_DURATION_DIFF_SECONDS = 300;
 const NARRATION_PERCENT_TOLERANCE = 5;
 
 export type BulkEditFieldResult = { updated: number; skippedLocked: number };
@@ -346,6 +368,8 @@ export class BookService {
     @Optional() private readonly audiobookChapters?: AudiobookChaptersService,
     @Optional() private readonly providerIdStore?: ProviderIdStore,
     @Optional() private readonly providerRegistry?: ProviderRegistry,
+    @Optional() private readonly bookAlias?: BookAliasService,
+    @Optional() private readonly linkMembers?: BookLinkMembersRepository,
   ) {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
@@ -373,7 +397,8 @@ export class BookService {
     required: AccessLevel = 'viewer',
   ): Promise<{ id: number; libraryId: number }[]> {
     const uniqueBookIds = [...new Set(bookIds)];
-    const rows = await this.bookRepo.findLibraryIdsByBookIds(uniqueBookIds);
+    const rows: { id: number; libraryId: number }[] = [];
+    for (const ids of chunk(uniqueBookIds, BOOK_ID_QUERY_CHUNK)) rows.push(...(await this.bookRepo.findLibraryIdsByBookIds(ids)));
     if (rows.length !== uniqueBookIds.length) {
       throw new NotFoundException('One or more books were not found');
     }
@@ -386,12 +411,8 @@ export class BookService {
   }
 
   private async verifyLibraryAccessLevels(libraryIds: number[], user: RequestUser, required: AccessLevel): Promise<void> {
-    const isSuperuser = this.isSuperuser(user);
-    if (isSuperuser) return;
     await mapWithConcurrency([...new Set(libraryIds)], 8, (libraryId) =>
-      required === 'viewer'
-        ? this.libraryService.verifyUserAccess(user.id, libraryId, isSuperuser)
-        : this.libraryService.verifyUserAccessLevel(user.id, libraryId, isSuperuser, required),
+      required === 'viewer' ? this.libraryService.verifyAccess(user, libraryId) : this.libraryService.verifyAccessLevel(user, libraryId, required),
     );
   }
 
@@ -606,26 +627,48 @@ export class BookService {
 
   async verifyBookAccess(bookId: number, user: RequestUser, required: AccessLevel = 'viewer'): Promise<void> {
     const libraryId = await this.bookRepo.findLibraryIdByBookId(bookId);
-    if (libraryId === null) throw new NotFoundException(`Book ${bookId} not found`);
-    // Not found, rather than forbidden. A 403 tells the caller the book exists, and book ids are
-    // sequential integers, so the id space can be walked to learn which books a server holds. The
-    // upload session routes already answer 404 for another account's session, and the content
-    // filter branch below already answers 404 here, so this is the one denial reason in this method
-    // that was disclosing existence. Measured as F-013.
+    if (libraryId === null) throw await this.missingBookError(bookId, user);
+    if (!(await this.canSeeBook(bookId, libraryId, user))) throw new NotFoundException(`Book ${bookId} not found`);
+    if (required !== 'viewer') await this.libraryService.verifyAccessLevel(user, libraryId, required);
+  }
+
+  /**
+   * Not found, rather than forbidden. A 403 tells the caller the book exists, and book ids are
+   * sequential integers, so the id space can be walked to learn which books a server holds. The
+   * upload session routes already answer 404 for another account's session, and the content filter
+   * check already answers 404, so a forbidden library is the one denial reason that was disclosing
+   * existence. Measured as F-013.
+   */
+  private async canSeeBook(bookId: number, libraryId: number, user: RequestUser): Promise<boolean> {
     try {
-      await this.libraryService.verifyUserAccess(user.id, libraryId, this.isSuperuser(user));
+      await this.libraryService.verifyAccess(user, libraryId);
     } catch (error) {
-      if (error instanceof ForbiddenException) {
-        throw new NotFoundException(`Book ${bookId} not found`);
-      }
+      if (error instanceof ForbiddenException) return false;
       throw error;
     }
-
     if (!this.isSuperuser(user) && user.contentFilters) {
-      const passes = await this.checkBookPassesContentFilters(bookId, user.contentFilters);
-      if (!passes) throw new NotFoundException(`Book ${bookId} not found`);
+      return this.checkBookPassesContentFilters(bookId, user.contentFilters);
     }
-    if (required !== 'viewer') await this.libraryService.verifyUserAccessLevel(user.id, libraryId, this.isSuperuser(user), required);
+    return true;
+  }
+
+  /**
+   * A merged-away id names the book it was merged into, so a client can follow it. Only to a caller
+   * who can see that book; anyone else gets the plain 404, which says nothing about either book.
+   */
+  private async missingBookError(bookId: number, user: RequestUser): Promise<NotFoundException> {
+    const targetBookId = (await this.bookAlias?.resolveOne(bookId)) ?? null;
+    if (targetBookId !== null) {
+      const targetLibraryId = await this.bookRepo.findLibraryIdByBookId(targetBookId);
+      if (targetLibraryId !== null && (await this.canSeeBook(targetBookId, targetLibraryId, user))) {
+        return new NotFoundException({
+          message: 'Book was merged into another book',
+          errorCode: BOOK_MERGED_ERROR_CODE,
+          errorMeta: { targetBookId },
+        });
+      }
+    }
+    return new NotFoundException(`Book ${bookId} not found`);
   }
 
   setHardcoverEditionIdIfEmpty(bookId: number, hardcoverEditionId: string): Promise<boolean> {
@@ -635,7 +678,7 @@ export class BookService {
   async verifyFileAccess(fileId: number, user: RequestUser): Promise<NonNullable<Awaited<ReturnType<BookRepository['findFileById']>>>> {
     const file = await this.bookRepo.findFileById(fileId);
     if (!file) throw new NotFoundException(`No file with id ${fileId}`);
-    await this.libraryService.verifyUserAccess(user.id, file.libraryId, this.isSuperuser(user));
+    await this.libraryService.verifyAccess(user, file.libraryId);
 
     if (!this.isSuperuser(user) && user.contentFilters) {
       const passes = await this.checkBookPassesContentFilters(file.bookId, user.contentFilters);
@@ -1166,7 +1209,7 @@ export class BookService {
 
   async queryForLibrary(user: RequestUser, libraryId: number, query: BookQuery): Promise<BooksPage> {
     this.assertPaginationWindow(query.pagination.page, query.pagination.size);
-    await this.libraryService.verifyUserAccess(user.id, libraryId, this.isSuperuser(user));
+    await this.libraryService.verifyAccess(user, libraryId);
     const timeZone = this.resolveUserTimeZone(user);
     const where = this.queryBuilder.buildWhere(query.filter, {
       accessibleLibraryIds: [libraryId],
@@ -1176,12 +1219,12 @@ export class BookService {
       timeZone,
       contentFilters: this.isSuperuser(user) ? undefined : user.contentFilters,
     });
-    return this.executeBooksQuery(user.id, where, query);
+    return this.executeBooksQuery(user.id, where, query, { viewer: user });
   }
 
   /** Browse-header counts from the listing's own where clause; sort, paging and collapse are ignored. */
   async facetsForLibrary(user: RequestUser, libraryId: number, query: BookQuery): Promise<LibraryBookFacets> {
-    await this.libraryService.verifyUserAccess(user.id, libraryId, this.isSuperuser(user));
+    await this.libraryService.verifyAccess(user, libraryId);
     const start = Date.now();
     const scope = {
       accessibleLibraryIds: [libraryId],
@@ -1224,7 +1267,36 @@ export class BookService {
       timeZone,
       contentFilters: this.isSuperuser(user) ? undefined : user.contentFilters,
     });
-    return this.executeBooksQuery(user.id, where, query);
+    return this.executeBooksQuery(user.id, where, query, { viewer: user });
+  }
+
+  /** Every book this user may see: their libraries and, unless a superuser, their content filters. */
+  async accessibleBooksWhere(user: RequestUser): Promise<SQL | undefined> {
+    const libs = await this.libraryService.findAll(user);
+    return this.queryBuilder.buildWhere(undefined, {
+      accessibleLibraryIds: libs.map((l) => l.id),
+      userId: user.id,
+      timeZone: this.resolveUserTimeZone(user),
+      contentFilters: this.isSuperuser(user) ? undefined : user.contentFilters,
+    });
+  }
+
+  /** Cards for these books in the order given, without any this user may not see. */
+  async findCardsByIds(user: RequestUser, ids: number[]): Promise<BookCard[]> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return [];
+    const where = and(await this.accessibleBooksWhere(user), inArray(books.id, unique));
+    const page = await this.executeBooksQuery(
+      user.id,
+      where,
+      {
+        sort: [{ field: 'title', dir: 'asc' }],
+        pagination: { page: 0, size: unique.length },
+      },
+      { viewer: user },
+    );
+    const byId = new Map(page.items.map((card) => [card.id, card]));
+    return unique.flatMap((id) => byId.get(id) ?? []);
   }
 
   /**
@@ -1247,11 +1319,13 @@ export class BookService {
     // caller resolved the selection filter to nothing, which is not the same thing.
     const seriesSelectionFilter = options && 'seriesSelectionFilter' in options ? options.seriesSelectionFilter : query.filter;
     const shouldCollapse = query.collapseSeries === true && !BookQueryBuilder.hasSeriesSelectionFilter(seriesSelectionFilter);
+    const collapseLinked = await this.shouldCollapseLinks(query, where);
+    const reportsBookTotal = query.collapseSeries === true || query.collapseLinked === true;
 
     const customFieldTypes = await this.resolveCustomSortFieldTypes(query.sort);
 
     if (shouldCollapse) {
-      const { rows, authorRows, fileRows, genreRows, tagRows, progressRows, statusRows, narratorRows, seriesMembershipRows, total } =
+      const { rows, authorRows, fileRows, genreRows, tagRows, progressRows, statusRows, narratorRows, seriesMembershipRows, total, bookTotal } =
         await this.bookRepo.findCardsCollapsed({
           where,
           sort: query.sort,
@@ -1261,6 +1335,7 @@ export class BookService {
           customFieldTypes,
           ...(options?.defaultCollectionId !== undefined ? { defaultCollectionId: options.defaultCollectionId } : {}),
           ...(query.randomSeed !== undefined ? { randomSeed: query.randomSeed } : {}),
+          ...(collapseLinked ? { collapseLinked: true } : {}),
         });
       // Collapsed rows render BookTableCollapsedSeriesCell which does not display custom metadata.
       const cards = assembleCollapsedBookCards(
@@ -1275,16 +1350,18 @@ export class BookService {
         seriesMembershipRows,
       );
       await this.coverStore.enrichCardFaces(cards);
-      const result = {
+      await this.attachCardLinks(cards, options?.viewer);
+      const result: BooksPage = {
         items: cards,
         total,
         page,
         size,
+        bookTotal: bookTotal ?? total,
       };
       const durationMs = Date.now() - start;
       if (durationMs >= 500) {
         this.logger.warn(
-          `[book.list_query] [end] userId=${userId} page=${page} size=${size} filterCount=${query.filter?.rules?.length ?? 0} sortFields=${query.sort?.length ?? 0} collapseSeries=true resultCount=${result.items.length} durationMs=${durationMs} - slow query`,
+          `[book.list_query] [end] userId=${userId} page=${page} size=${size} filterCount=${query.filter?.rules?.length ?? 0} sortFields=${query.sort?.length ?? 0} collapseSeries=true collapseLinked=${collapseLinked} resultCount=${result.items.length} durationMs=${durationMs} - slow query`,
         );
       }
       return result;
@@ -1295,14 +1372,17 @@ export class BookService {
       ...(query.randomSeed !== undefined ? { randomSeed: query.randomSeed } : {}),
       ...(query.q !== undefined ? { query: query.q } : {}),
     });
-    const { rows, authorRows, fileRows, genreRows, tagRows, progressRows, statusRows, narratorRows, seriesMembershipRows, total } =
-      await this.bookRepo.findCards({
-        where,
-        orderBy,
-        limit: size,
-        offset: page * size,
-        userId,
-      });
+    const cardQuery = { where, orderBy, limit: size, offset: page * size, userId };
+    let bookTotal: number | undefined;
+    let cardPage: Awaited<ReturnType<BookRepository['findCards']>>;
+    if (collapseLinked) {
+      const folded = await this.bookRepo.findCardsLinkCollapsed(cardQuery);
+      cardPage = folded;
+      bookTotal = folded.bookTotal;
+    } else {
+      cardPage = await this.bookRepo.findCards(cardQuery);
+    }
+    const { rows, authorRows, fileRows, genreRows, tagRows, progressRows, statusRows, narratorRows, seriesMembershipRows, total } = cardPage;
     const bookIds = rows.map((r) => r.id);
     const customMetadataRows = await this.customMetadataService.getCardValues(bookIds);
     const cards = assembleBookCards(
@@ -1318,19 +1398,45 @@ export class BookService {
       customMetadataRows,
     );
     await this.coverStore.enrichCardFaces(cards);
-    const result = {
+    await this.attachCardLinks(cards, options?.viewer);
+    const result: BooksPage = {
       items: cards,
       total,
       page,
       size,
+      ...(reportsBookTotal ? { bookTotal: bookTotal ?? total } : {}),
     };
     const durationMs = Date.now() - start;
     if (durationMs >= 500) {
       this.logger.warn(
-        `[book.list_query] [end] userId=${userId} page=${page} size=${size} filterCount=${query.filter?.rules?.length ?? 0} sortFields=${query.sort?.length ?? 0} collapseSeries=false resultCount=${result.items.length} durationMs=${durationMs} - slow query`,
+        `[book.list_query] [end] userId=${userId} page=${page} size=${size} filterCount=${query.filter?.rules?.length ?? 0} sortFields=${query.sort?.length ?? 0} collapseSeries=false collapseLinked=${collapseLinked} resultCount=${result.items.length} durationMs=${durationMs} - slow query`,
       );
     }
     return result;
+  }
+
+  /**
+   * Folding linked books is opt-in (`collapseLinked`, never sent by released clients) and costs one
+   * probe. Where no link group has two members in the listing, the plain query runs unchanged.
+   */
+  private async shouldCollapseLinks(query: BookQuery, where: SQL | undefined): Promise<boolean> {
+    return query.collapseLinked === true && (await this.bookRepo.hasCollapsibleLinks(where));
+  }
+
+  /**
+   * Fills `linked` for cards whose book shares a group with present books this user can see, in one
+   * query for the page. A series stack stands for several books, so it carries none.
+   */
+  private async attachCardLinks(cards: BookCard[], viewer: RequestUser | undefined): Promise<void> {
+    if (!viewer) return;
+    const bookIds = cards.filter((card) => (card.collapsedSeries?.bookCount ?? 1) <= 1).map((card) => card.id);
+    const linkedIds = await this.bookRepo.findLinkedBookIds(bookIds);
+    if (linkedIds.length === 0) return;
+    const links = await this.bookRepo.findCardLinks(linkedIds, await this.accessibleBooksWhere(viewer));
+    for (const card of cards) {
+      const info = links.get(card.id);
+      if (info) card.linked = info;
+    }
   }
 
   async executeBookIdsQuery(userId: number, where: SQL | undefined, query: BookQuery): Promise<number[]> {
@@ -1348,7 +1454,7 @@ export class BookService {
   }
 
   async queryJumpBucketsForLibrary(user: RequestUser, libraryId: number, query: JumpBucketsQuery): Promise<JumpBucketsResponse> {
-    await this.libraryService.verifyUserAccess(user.id, libraryId, this.isSuperuser(user));
+    await this.libraryService.verifyAccess(user, libraryId);
     const timeZone = this.resolveUserTimeZone(user);
     const where = this.queryBuilder.buildWhere(query.filter, {
       accessibleLibraryIds: [libraryId],
@@ -1377,7 +1483,10 @@ export class BookService {
     if (!strategy) throw new BadRequestException('jump buckets are not available for this sort');
 
     const start = Date.now();
+    let collapseLinked = false;
     try {
+      collapseLinked = await this.shouldCollapseLinks(query, where);
+      const randomSeedOption = query.randomSeed !== undefined ? { randomSeed: query.randomSeed } : {};
       let response: JumpBucketsResponse;
       if (strategy.kind === 'temporal') {
         const temporalOpts = {
@@ -1389,9 +1498,19 @@ export class BookService {
           timeZone,
           maxBuckets: query.maxBuckets,
         };
-        response = shouldCollapse
-          ? await this.bookRepo.findTemporalJumpBucketsCollapsed(temporalOpts)
-          : await this.bookRepo.findTemporalJumpBuckets(temporalOpts);
+        if (shouldCollapse) {
+          response = await this.bookRepo.findTemporalJumpBucketsCollapsed({ ...temporalOpts, ...(collapseLinked ? { collapseLinked: true } : {}) });
+        } else {
+          // A folded group sits where the listing's full order puts its first member, so the
+          // buckets rank members with that same order.
+          const linkCollapseOrderBy = collapseLinked
+            ? this.queryBuilder.buildOrderBy(query.sort, userId, await this.resolveCustomSortFieldTypes(query.sort), {
+                ...randomSeedOption,
+                ...(query.q !== undefined ? { query: query.q } : {}),
+              })
+            : undefined;
+          response = await this.bookRepo.findTemporalJumpBuckets({ ...temporalOpts, ...(linkCollapseOrderBy ? { linkCollapseOrderBy } : {}) });
+        }
       } else {
         const discreteOpts = {
           where,
@@ -1404,26 +1523,27 @@ export class BookService {
         // rows inside a bucket, so they can reference custom fields. The temporal path
         // never applies the full sort, which is why this only matters here.
         const customFieldTypes = await this.resolveCustomSortFieldTypes(query.sort);
-        const randomSeedOption = query.randomSeed !== undefined ? { randomSeed: query.randomSeed } : {};
+        const linkOption = collapseLinked ? { collapseLinked: true } : {};
         response = shouldCollapse
-          ? await this.bookRepo.findJumpBucketsCollapsed({ ...discreteOpts, sort: query.sort, customFieldTypes, ...randomSeedOption })
+          ? await this.bookRepo.findJumpBucketsCollapsed({ ...discreteOpts, sort: query.sort, customFieldTypes, ...randomSeedOption, ...linkOption })
           : await this.bookRepo.findJumpBuckets({
               ...discreteOpts,
               orderBy: this.queryBuilder.buildOrderBy(query.sort, userId, customFieldTypes, {
                 ...randomSeedOption,
                 ...(query.q !== undefined ? { query: query.q } : {}),
               }),
+              ...linkOption,
             });
       }
       this.logger.log(
-        `[${event}] [end] userId=${userId} kind=${kind} collapse=${shouldCollapse} maxBuckets=${query.maxBuckets} durationMs=${Date.now() - start} bucketCount=${response.buckets.length} total=${response.total} - jump buckets computed`,
+        `[${event}] [end] userId=${userId} kind=${kind} collapse=${shouldCollapse} collapseLinked=${collapseLinked} maxBuckets=${query.maxBuckets} durationMs=${Date.now() - start} bucketCount=${response.buckets.length} total=${response.total} - jump buckets computed`,
       );
       return response;
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
       const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
-        `[${event}] [fail] userId=${userId} kind=${kind} collapse=${shouldCollapse} durationMs=${Date.now() - start} errorClass=${errorClass} error="${errorMessage}" - jump buckets failed`,
+        `[${event}] [fail] userId=${userId} kind=${kind} collapse=${shouldCollapse} collapseLinked=${collapseLinked} durationMs=${Date.now() - start} errorClass=${errorClass} error="${errorMessage}" - jump buckets failed`,
       );
       throw err;
     }
@@ -1680,7 +1800,7 @@ export class BookService {
     this.logger.log(`[${event}] [start] fileId=${fileId} userId=${user.id} - rename file started`);
     try {
       const file = await this.verifyFileAccess(fileId, user);
-      await this.libraryService.verifyUserAccessLevel(user.id, file.libraryId, this.isSuperuser(user), 'editor');
+      await this.libraryService.verifyAccessLevel(user, file.libraryId, 'editor');
 
       let newAbsolutePath = file.absolutePath;
       if (dto.filename && dto.filename !== basename(file.absolutePath)) {
@@ -2318,7 +2438,7 @@ export class BookService {
   async saveAudioProgress(userId: number, bookId: number, dto: UpsertAudioProgressDto, user: RequestUser) {
     const libraryId = await this.bookRepo.findLibraryIdByBookId(bookId);
     if (libraryId === null) throw new NotFoundException(`Book ${bookId} not found`);
-    await this.libraryService.verifyUserAccess(userId, libraryId, this.isSuperuser(user));
+    await this.libraryService.verifyAccess(user, libraryId);
     const currentFile = await this.verifyFileAccess(dto.currentFileId, user);
     if (currentFile.bookId !== bookId) {
       throw new BadRequestException(`currentFileId ${dto.currentFileId} does not belong to book ${bookId}`);
@@ -2697,12 +2817,39 @@ export class BookService {
     };
   }
 
-  async bulkSetStatus(bookIds: number[], status: ReadStatus, user: RequestUser): Promise<void> {
+  async bulkSetStatus(bookIds: number[], dto: Pick<SetStatusDto, 'status' | 'startedAt' | 'finishedAt'>, user: RequestUser): Promise<void> {
+    if (dto.status === undefined) throw new BadRequestException('status is required');
+    const status = dto.status;
     const event = 'book.bulk.set_status';
     const startedAt = Date.now();
     this.logger.log(`[${event}] [start] userId=${user.id} count=${bookIds.length} status=${status} - bulk set status started`);
     await this.verifyLibraryAccessForBookIds(bookIds, user);
-    await this.userBookStatusService.bulkSetManual(user.id, bookIds, status);
+    const timeZone = this.resolveUserTimeZone(user);
+    const datePatch: { startedAt?: Date | null; finishedAt?: Date | null } = {};
+    const dateKeys: { startedOn?: string | null; endedOn?: string | null } = {};
+
+    if (dto.startedAt !== undefined) {
+      if (dto.startedAt === null) {
+        datePatch.startedAt = null;
+        dateKeys.startedOn = null;
+      } else {
+        const normalized = this.parseManualReadDateInput(dto.startedAt, 'startedAt', timeZone);
+        datePatch.startedAt = normalized.date;
+        dateKeys.startedOn = normalized.dateKey;
+      }
+    }
+    if (dto.finishedAt !== undefined) {
+      if (dto.finishedAt === null) {
+        datePatch.finishedAt = null;
+        dateKeys.endedOn = null;
+      } else {
+        const normalized = this.parseManualReadDateInput(dto.finishedAt, 'finishedAt', timeZone);
+        datePatch.finishedAt = normalized.date;
+        dateKeys.endedOn = normalized.dateKey;
+      }
+    }
+
+    await this.userBookStatusService.bulkSetManual(user.id, bookIds, status, datePatch, dateKeys, timeZone);
     this.logger.log(
       `[${event}] [end] userId=${user.id} count=${bookIds.length} status=${status} durationMs=${Date.now() - startedAt} - bulk set status completed`,
     );
@@ -3117,7 +3264,7 @@ export class BookService {
       if (!found) throw new NotFoundException(`Book ${id} not found`);
 
       const { book, authorRows, genreRows, communityRatingRows, fileRows, narratorRows } = found;
-      await this.libraryService.verifyUserAccessLevel(user.id, book.books.libraryId, this.isSuperuser(user), 'editor');
+      await this.libraryService.verifyAccessLevel(user, book.books.libraryId, 'editor');
       const meta = book.book_metadata;
 
       const providerIds = { ...this.collectExistingProviderIds(meta ?? {}), ...(await this.providerIdStore?.read(id)) };
@@ -3255,69 +3402,38 @@ export class BookService {
     }
   }
 
-  async bulkRefreshMetadata(
-    bookIds: number[],
-    user: RequestUser,
-    onProgress?: (event: { bookId: number; success: boolean; detail?: BookDetailDto; error?: string }) => void,
-    options?: { isCancelled?: () => boolean; ignoreCache?: boolean },
-  ): Promise<{ processed: number; failed: number }> {
-    const event = 'book.bulk_refresh_metadata';
-    const startedAt = Date.now();
-    const cacheDirective: CacheDirective = { policy: options?.ignoreCache ? 'refresh' : 'default', allowFallback: true };
-    this.logger.log(
-      `[${event}] [start] count=${bookIds.length} userId=${user.id} ignoreCache=${options?.ignoreCache === true} - bulk refresh metadata started`,
-    );
+  /**
+   * Whether one book of a bulk run may still be worked on by `user` as an editor. A run checks each
+   * book as it reaches it, so a book deleted or moved out of reach while the run waited is passed
+   * over instead of failing the whole selection.
+   */
+  async bulkItemAccess(bookId: number, user: RequestUser): Promise<'ok' | BulkBookSkipCode> {
+    const libraryId = await this.bookRepo.findLibraryIdByBookId(bookId);
+    if (libraryId === null) return 'not-found';
     try {
-      if (bookIds.length === 0) {
-        this.logger.log(`[${event}] [end] count=0 durationMs=${Date.now() - startedAt} processed=0 failed=0 - bulk refresh metadata completed`);
-        return { processed: 0, failed: 0 };
-      }
-      await this.verifyLibraryAccessForBookIds(bookIds, user, 'editor');
+      await this.libraryService.verifyAccessLevel(user, libraryId, 'editor');
+      return 'ok';
+    } catch (error) {
+      if (error instanceof ForbiddenException) return 'no-access';
+      if (error instanceof NotFoundException) return 'not-found';
+      throw error;
+    }
+  }
 
-      let processed = 0;
-      let failed = 0;
-      let callbackInterrupted = false;
-      let cancelled = false;
-      for (const id of bookIds) {
-        if (options?.isCancelled?.()) {
-          cancelled = true;
-          break;
-        }
-        let success = false;
-        let detail: BookDetailDto | undefined;
-        let errorMessage: string | undefined;
-        try {
-          const refreshed = await this.refreshMetadata(id, false, user, { cacheDirective });
-          detail = refreshed as BookDetailDto;
-          processed++;
-          success = true;
-        } catch (err) {
-          const itemErrorClass = err instanceof Error ? err.name : 'Error';
-          const itemError = sanitizeLogValue(err instanceof Error ? err.message : String(err));
-          errorMessage = err instanceof Error ? err.message : String(err);
-          this.logger.warn(
-            `[${event}] [fail] bookId=${id} userId=${user.id} durationMs=${Date.now() - startedAt} errorClass=${itemErrorClass} error="${itemError}" - bulk refresh metadata item failed`,
-          );
-          failed++;
-        }
-        try {
-          onProgress?.({ bookId: id, success, detail, error: errorMessage });
-        } catch {
-          callbackInterrupted = true;
-          break;
-        }
-      }
-      this.logger.log(
-        `[${event}] [end] count=${bookIds.length} durationMs=${Date.now() - startedAt} processed=${processed} failed=${failed} callbackInterrupted=${callbackInterrupted} cancelled=${cancelled} - bulk refresh metadata completed`,
-      );
-      return { processed, failed };
+  /** One book of a bulk metadata refresh; a provider or write failure is a failed item, never a throw. */
+  async refreshMetadataBulkItem(id: number, user: RequestUser, options?: { ignoreCache?: boolean }): Promise<BulkRefreshMetadataItem> {
+    const access = await this.bulkItemAccess(id, user);
+    if (access !== 'ok') return { status: 'skipped', code: access };
+    const cacheDirective: CacheDirective = { policy: options?.ignoreCache ? 'refresh' : 'default', allowFallback: true };
+    try {
+      const detail = (await this.refreshMetadata(id, false, user, { cacheDirective })) as BookDetailDto;
+      return { status: 'success', detail };
     } catch (err) {
-      const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      if (err instanceof NotFoundException) return { status: 'skipped', code: 'not-found' };
       this.logger.warn(
-        `[${event}] [fail] count=${bookIds.length} userId=${user.id} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - bulk refresh metadata failed`,
+        `[book.bulk_refresh_metadata] [fail] bookId=${id} userId=${user.id} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - bulk refresh metadata item failed`,
       );
-      throw err;
+      return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -3337,19 +3453,6 @@ export class BookService {
       }
       await this.verifyLibraryAccessForBookIds(bookIds, user, 'editor');
 
-      const [files, coverLockedBookIds, audioCoverLockedBookIds] = await Promise.all([
-        this.bookRepo.findCoverSourceFilesByBookIds(bookIds),
-        this.bookMetadataLockService.getCoverLockedBookIds(bookIds),
-        this.bookMetadataLockService.getBookIdsWithLockedField(bookIds, 'audioCover'),
-      ]);
-      const filesByBookId = new Map<number, (typeof files)[number][]>();
-      for (const file of files) {
-        const entries = filesByBookId.get(file.bookId) ?? [];
-        entries.push(file);
-        filesByBookId.set(file.bookId, entries);
-      }
-      const media: readonly CoverMedium[] = options?.medium ? [options.medium] : COVER_MEDIA;
-
       let processed = 0;
       let updated = 0;
       let skipped = 0;
@@ -3360,28 +3463,15 @@ export class BookService {
           cancelled = true;
           break;
         }
-        const candidateFiles = filesByBookId.get(id) ?? [];
-        const sources = selectEmbeddedCoverSources(candidateFiles, candidateFiles[0]?.formatPriority ?? DEFAULT_FORMAT_PRIORITY);
-        const targets = media.flatMap((medium) => {
-          const source = sources[medium];
-          return source ? [{ medium, source }] : [];
-        });
-        if (targets.length === 0) continue;
-        const unlocked = targets.filter(({ medium }) => !(medium === 'audio' ? audioCoverLockedBookIds : coverLockedBookIds).has(id));
-        if (unlocked.length === 0) {
+        const item = await this.reExtractCoverItem(id, options?.medium);
+        if (item.status === 'no-source') continue;
+        if (item.status === 'locked') {
           skipped++;
           options?.onSkippedLocked?.(id);
           continue;
         }
         processed++;
-        let saved = false;
-        for (const { medium, source } of unlocked) {
-          saved = (await this.metadataService.refreshCoverForBook(id, source.absolutePath, source.format ?? '', medium)) || saved;
-        }
-        if (saved) {
-          updated++;
-        }
-        if (!options?.medium) await this.coverReconciler?.enqueue([id]);
+        if (item.updated) updated++;
         try {
           onProgress?.(id);
         } catch {
@@ -3401,6 +3491,42 @@ export class BookService {
       );
       throw err;
     }
+  }
+
+  /** One book of a bulk cover re-extraction, checked for access as the run reaches it. */
+  async reExtractCoverBulkItem(id: number, user: RequestUser): Promise<BulkReExtractCoverItem> {
+    const access = await this.bulkItemAccess(id, user);
+    if (access !== 'ok') return { status: 'skipped', code: access };
+    return this.reExtractCoverItem(id);
+  }
+
+  /**
+   * Re-extracts one book's cover slots from its own files, reading only that book's files and locks.
+   * The caller has checked access. A locked slot is left alone; with no medium named, the book is
+   * queued for cover reconciliation once a slot was attempted.
+   */
+  private async reExtractCoverItem(id: number, medium?: CoverMedium): Promise<Exclude<BulkReExtractCoverItem, { status: 'skipped' }>> {
+    const [files, coverLocked, audioCoverLocked] = await Promise.all([
+      this.bookRepo.findCoverSourceFilesByBookIds([id]),
+      this.bookMetadataLockService.getCoverLockedBookIds([id]),
+      this.bookMetadataLockService.getBookIdsWithLockedField([id], 'audioCover'),
+    ]);
+    const candidateFiles = files.filter((file) => file.bookId === id);
+    const sources = selectEmbeddedCoverSources(candidateFiles, candidateFiles[0]?.formatPriority ?? DEFAULT_FORMAT_PRIORITY);
+    const media: readonly CoverMedium[] = medium ? [medium] : COVER_MEDIA;
+    const targets = media.flatMap((entry) => {
+      const source = sources[entry];
+      return source ? [{ medium: entry, source }] : [];
+    });
+    if (targets.length === 0) return { status: 'no-source' };
+    const unlocked = targets.filter((target) => !(target.medium === 'audio' ? audioCoverLocked : coverLocked).has(id));
+    if (unlocked.length === 0) return { status: 'locked' };
+    let saved = false;
+    for (const { medium: slot, source } of unlocked) {
+      saved = (await this.metadataService.refreshCoverForBook(id, source.absolutePath, source.format ?? '', slot)) || saved;
+    }
+    if (!medium) await this.coverReconciler?.enqueue([id]);
+    return { status: 'attempted', updated: saved };
   }
 
   /**
@@ -3457,7 +3583,7 @@ export class BookService {
       }
 
       const uniqueLibraryIds = [...new Set(rows.map((row) => row.libraryId))];
-      await Promise.all(uniqueLibraryIds.map((libraryId) => this.libraryService.verifyUserAccess(user.id, libraryId, this.isSuperuser(user))));
+      await Promise.all(uniqueLibraryIds.map((libraryId) => this.libraryService.verifyAccess(user, libraryId)));
 
       const bookOrder = new Map(uniqueBookIds.map((id, index) => [id, index]));
       const fetchedFiles: ExportCandidateFile[] =
@@ -3530,7 +3656,7 @@ export class BookService {
 
   async getDetail(id: number, user: RequestUser): Promise<BookDetailDto> {
     await this.verifyBookAccess(id, user);
-    const [result, personalRating, personalNote, readStatus, comicMeta, collectionRows, readAloudSyncMode, coverContext] = await Promise.all([
+    const [result, personalRating, personalNote, readStatus, comicMeta, collectionRows, readAloudSyncMode, coverContext, linked] = await Promise.all([
       this.bookRepo.findById(id),
       this.bookRepo.findRatingByBookAndUser(id, user.id),
       this.userBookNoteService.findOne(user.id, id),
@@ -3539,6 +3665,7 @@ export class BookService {
       this.bookRepo.findCollectionsByBookId(id, user.id),
       this.bookRepo.findReadAloudSyncMode(user.id, id),
       this.coverStore.contextFor(id),
+      this.findLinkedBooks(id, user),
     ]);
     if (!result || !coverContext) throw new NotFoundException(`Book ${id} not found`);
 
@@ -3567,7 +3694,7 @@ export class BookService {
       collections: collectionRows,
     });
     const mediaOverlayByFileId = await this.resolveMediaOverlayCapabilities(fileRows);
-    const readAloudSync = this.buildReadAloudProgressSync(fileRows, mediaOverlayByFileId, book.books.primaryFileId, readAloudSyncMode);
+    const readAloudSync = await this.resolveReadAloudProgressSync(fileRows, mediaOverlayByFileId, book.books.primaryFileId, readAloudSyncMode);
 
     return {
       id: book.books.id,
@@ -3621,6 +3748,8 @@ export class BookService {
       authors: authorRows,
       genres: genreRows.map((g) => g.name),
       tags: tagRows.map((t) => t.name),
+      genreRefs: genreRows.map((g) => ({ id: g.id, name: g.name })),
+      tagRefs: tagRows.map((t) => ({ id: t.id, name: t.name })),
       files: orderedFileRows.map((f) => ({
         id: f.id,
         format: f.format,
@@ -3654,7 +3783,25 @@ export class BookService {
         writableFields: [],
       },
       ...supplementalFields,
+      linkedBooks: linked.books,
+      linkGroupId: linked.groupId,
+      linkIsLead: linked.isLead,
     };
+  }
+
+  /** Other books shown as this one, only those this user may see. Empty when it is not linked. */
+  async findLinkedBooks(bookId: number, user: RequestUser): Promise<{ groupId: number | null; books: LinkedBookSummary[]; isLead: boolean }> {
+    if (!this.linkMembers) return { groupId: null, books: [], isLead: false };
+    const groupId = await this.linkMembers.findGroupId(bookId);
+    if (groupId === null) return { groupId: null, books: [], isLead: false };
+    return this.linkMembers.findLinkedBooks(bookId, groupId, await this.accessibleBooksWhere(user));
+  }
+
+  /** The members of a link group this user may see, lead first. Empty when fewer than two remain. */
+  async findLinkGroupMembers(groupId: number, user: RequestUser): Promise<LinkedBookSummary[]> {
+    if (!this.linkMembers) return [];
+    const members = await this.linkMembers.findMembers([groupId], await this.accessibleBooksWhere(user));
+    return members.map(toLinkedBookSummary);
   }
 
   private async resolveMediaOverlayCapabilities(
@@ -3686,19 +3833,60 @@ export class BookService {
     return new Map(entries);
   }
 
-  private buildReadAloudProgressSync(
-    fileRows: Array<{ id: number; format: string | null; durationSeconds: number | null }>,
+  private selectReadAloudOverlay<T extends { id: number; format: string | null }>(
+    fileRows: T[],
+    mediaOverlayByFileId: Map<number, EpubMediaOverlayCapability | null>,
+    primaryFileId: number | null,
+  ): T | null {
+    const overlayFiles = fileRows.filter((file) => file.format?.toLowerCase() === 'epub' && mediaOverlayByFileId.get(file.id)?.available === true);
+    return overlayFiles.find((file) => file.id === primaryFileId) ?? overlayFiles[0] ?? null;
+  }
+
+  private async resolveReadAloudProgressSync(
+    fileRows: Array<{ id: number; format: string | null; absolutePath: string; durationSeconds: number | null }>,
     mediaOverlayByFileId: Map<number, EpubMediaOverlayCapability | null>,
     primaryFileId: number | null,
     mode: ReadAloudProgressSyncMode,
+  ): Promise<ReadAloudProgressSync> {
+    const overlayFile = this.selectReadAloudOverlay(fileRows, mediaOverlayByFileId, primaryFileId);
+    const hasAudio = fileRows.some((file) => file.format && isAudioFormat(file.format));
+    const timelineSeconds = overlayFile && hasAudio && mode !== 'disabled' ? await this.measureReadAloudTimeline(overlayFile) : null;
+    return this.buildReadAloudProgressSync(fileRows, overlayFile, timelineSeconds, mode);
+  }
+
+  /**
+   * Measuring parses every media overlay document of a read-along EPUB, which takes seconds for a
+   * long book, so the answer is stored per file version and survives restarts.
+   */
+  private async measureReadAloudTimeline(overlayFile: { id: number; absolutePath: string }): Promise<number | null> {
+    try {
+      const [{ size, mtimeMs }, stored] = await Promise.all([stat(overlayFile.absolutePath), this.bookRepo.findAudioTimeline(overlayFile.id)]);
+      if (stored && stored.sizeBytes === size && stored.mtimeMs === mtimeMs) return stored.totalSeconds;
+      const totalSeconds = await readEpubAudioTimelineSeconds(overlayFile.absolutePath);
+      await this.bookRepo.saveAudioTimeline({ fileId: overlayFile.id, sizeBytes: size, mtimeMs, totalSeconds }).catch((err: unknown) => {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.logger.warn(
+          `[book.read_aloud_timeline] [fail] fileId=${overlayFile.id} errorClass=${error.constructor.name} error="${sanitizeLogValue(error.message)}" - read-aloud EPUB audio timeline could not be stored`,
+        );
+      });
+      return totalSeconds;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[book.read_aloud_timeline] [fail] fileId=${overlayFile.id} errorClass=${error.constructor.name} error="${sanitizeLogValue(error.message)}" - read-aloud EPUB audio timeline could not be measured`,
+      );
+      return null;
+    }
+  }
+
+  private buildReadAloudProgressSync(
+    fileRows: Array<{ id: number; format: string | null; durationSeconds: number | null }>,
+    overlayFile: { id: number } | null,
+    overlayDurationSeconds: number | null,
+    mode: ReadAloudProgressSyncMode,
   ): ReadAloudProgressSync {
-    const overlayFiles = fileRows
-      .map((file) => ({ file, mediaOverlay: mediaOverlayByFileId.get(file.id) ?? null }))
-      .filter(({ file, mediaOverlay }) => file.format?.toLowerCase() === 'epub' && mediaOverlay?.available === true);
-    const selectedOverlay = overlayFiles.find(({ file }) => file.id === primaryFileId) ?? overlayFiles[0] ?? null;
     const audioFiles = fileRows.filter((file) => file.format && isAudioFormat(file.format));
     const audioDurationSeconds = this.sumPositiveDurations(audioFiles);
-    const overlayDurationSeconds = selectedOverlay?.mediaOverlay?.durationSeconds ?? null;
     const durationDifferenceSeconds =
       audioDurationSeconds != null && overlayDurationSeconds != null ? Math.abs(audioDurationSeconds - overlayDurationSeconds) : null;
     const durationDifferenceRatio =
@@ -3708,18 +3896,18 @@ export class BookService {
 
     const base: Omit<ReadAloudProgressSync, 'state' | 'unavailableReason'> = {
       mode,
-      overlayFileId: selectedOverlay?.file.id ?? null,
+      overlayFileId: overlayFile?.id ?? null,
       audioDurationSeconds,
       overlayDurationSeconds,
       durationDifferenceSeconds,
       durationDifferenceRatio,
-      koreaderDownloadAvailable: selectedOverlay != null,
+      koreaderDownloadAvailable: overlayFile != null,
     };
 
     if (mode === 'disabled') {
       return { ...base, state: 'disabled', unavailableReason: null };
     }
-    if (!selectedOverlay) {
+    if (!overlayFile) {
       return { ...base, state: 'unavailable', unavailableReason: 'no_media_overlay_epub' };
     }
     if (audioFiles.length === 0) {
@@ -3729,8 +3917,7 @@ export class BookService {
       return { ...base, state: 'unavailable', unavailableReason: 'missing_duration' };
     }
 
-    const tolerance = Math.min(READ_ALOUD_MAX_DURATION_DIFF_SECONDS, overlayDurationSeconds * READ_ALOUD_MAX_DURATION_DIFF_RATIO);
-    if (durationDifferenceSeconds != null && durationDifferenceSeconds > tolerance) {
+    if (!readAloudDurationsMatch(audioDurationSeconds, overlayDurationSeconds)) {
       return { ...base, state: 'unavailable', unavailableReason: 'duration_mismatch' };
     }
 
@@ -3794,12 +3981,66 @@ export class BookService {
     };
   }
 
+  async embedAudioCover(bookId: number, user: RequestUser): Promise<AudioCoverEmbedResult> {
+    await this.verifyBookAccess(bookId, user, 'editor');
+    return (
+      (await this.fileWriteService?.embedAudioCover(bookId, user.id)) ?? {
+        status: 'skipped',
+        code: 'unsupported',
+        fieldsWritten: [],
+        durationMs: 0,
+        reason: 'file write service unavailable',
+      }
+    );
+  }
+
+  /**
+   * The books among `bookIds` that hold a read-along EPUB, read in bounded chunks. A bulk embed visits
+   * only these; the rest count as skipped without a visit, which keeps a whole-library selection cheap.
+   */
+  async findReadAlongBookIds(bookIds: readonly number[]): Promise<Set<number>> {
+    const found = new Set<number>();
+    if (!this.fileWriteService) return found;
+    for (const ids of chunk(bookIds, BOOK_ID_QUERY_CHUNK)) {
+      for (const id of await this.fileWriteService.findBookIdsWithReadAlongFiles(ids)) found.add(id);
+    }
+    return found;
+  }
+
+  /**
+   * One book of a bulk audiobook cover embed. Books are embedded one at a time so the rewrites of
+   * files that run to hundreds of megabytes never overlap; an unexpected error is a failed item.
+   */
+  async embedAudioCoverBulkItem(id: number, user: RequestUser): Promise<BulkEmbedAudioCoverItem> {
+    const access = await this.bulkItemAccess(id, user);
+    if (access !== 'ok')
+      return { status: 'skipped', code: access, fieldsWritten: [], durationMs: 0, reason: access === 'not-found' ? 'book not found' : 'no access' };
+    try {
+      return await this.embedAudioCover(id, user);
+    } catch (err) {
+      if (err instanceof NotFoundException)
+        return { status: 'skipped', code: 'not-found', fieldsWritten: [], durationMs: 0, reason: 'book not found' };
+      this.logger.warn(
+        `[book.bulk_embed_audio_cover] [fail] bookId=${id} userId=${user.id} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - bulk audio cover embed item failed`,
+      );
+      return { status: 'failed', code: 'failed', fieldsWritten: [], durationMs: 0, reason: 'unexpected error' };
+    }
+  }
+
   async updatePersonalNote(id: number, dto: UpdatePersonalNoteDto, user: RequestUser): Promise<BookDetailDto> {
     await this.verifyBookAccess(id, user);
     // A body without `note` leaves the note alone, as an omitted key does on the other partial
     // routes; `null` clears it. The web and every iOS build send the key, null included.
     if (dto.note !== undefined) await this.userBookNoteService.setNote(user.id, id, dto.note);
     return this.getDetail(id, user);
+  }
+
+  async getIsbnCandidates(id: number, user: RequestUser): Promise<BookIsbnCandidates> {
+    await this.verifyBookAccess(id, user);
+    const file = await this.bookRepo.findPrimaryFile(id);
+    if (!file) throw new NotFoundException(`Book ${id} has no primary file`);
+    if (!file.format || !this.metadataExtraction) return { readable: false, candidates: [] };
+    return this.metadataExtraction.findIsbnCandidates(file.absolutePath, file.format);
   }
 
   async getMetadataFromFile(id: number, user: RequestUser): Promise<Record<string, unknown>> {

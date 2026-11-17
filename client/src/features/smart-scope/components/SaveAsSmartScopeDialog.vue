@@ -1,16 +1,21 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { X } from '@lucide/vue'
 import { useSmartScopes } from '@/features/smart-scope/composables/useSmartScopes'
 import IconPicker from '@/components/IconPicker.vue'
-import type { GroupRule, SortSpec } from '@bookorbit/types'
+import type { CoverAspectRatio, GroupRule, SortSpec } from '@bookorbit/types'
 
 const props = defineProps<{
   open: boolean
   filter: GroupRule | undefined
   sort: SortSpec[]
+  /** The grid shape of the view the scope is saved from, so a scope cut from a square library stays square. */
+  coverAspectRatio?: CoverAspectRatio
+  /** Seeds the form each time it opens, for a page that already has a name and an icon to offer. */
+  initialName?: string
+  initialIcon?: string
 }>()
 
 const emit = defineEmits<{ close: [] }>()
@@ -24,6 +29,15 @@ const icon = ref('')
 const saving = ref(false)
 const error = ref<string | null>(null)
 const trimmedName = computed(() => name.value.trim())
+
+watch(
+  () => props.open,
+  (open) => {
+    if (!open) return
+    if (props.initialName) name.value = props.initialName
+    if (props.initialIcon) icon.value = props.initialIcon
+  },
+)
 const trimmedIcon = computed(() => icon.value.trim())
 
 async function submit() {
@@ -43,6 +57,7 @@ async function submit() {
       icon: trimmedIcon.value,
       filter: props.filter,
       defaultSort: props.sort,
+      coverAspectRatio: props.coverAspectRatio,
     })
     name.value = ''
     icon.value = ''

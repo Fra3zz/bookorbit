@@ -15,19 +15,24 @@ import { BookDockEventsService } from './book-dock-events.service';
 import { BookDockFinalizeService } from './book-dock-finalize.service';
 import { BookDockGateway } from './book-dock.gateway';
 import { BookDockIngestService } from './book-dock-ingest.service';
+import { BookDockJoinService } from './book-dock-join.service';
 import { BookDockMetadataService } from './book-dock-metadata.service';
 import { BookDockModule } from './book-dock.module';
 import { BookDockProcessingStateService } from './book-dock-processing-state.service';
 import { BookDockRepository } from './book-dock.repository';
 import { BookDockService } from './book-dock.service';
 import { BookDockWatcherService } from './book-dock-watcher.service';
+import { LibraryDockController } from './library-dock.controller';
+import { LibraryDockRegistry } from './library-dock-registry.service';
+import { LibraryDockRepository } from './library-dock.repository';
+import { LibraryDockService } from './library-dock.service';
 
 describe('BookDockModule', () => {
   it('registers expected controller and provider graph', () => {
     const controllers = Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, BookDockModule);
     const providers = Reflect.getMetadata(MODULE_METADATA.PROVIDERS, BookDockModule) as Array<unknown>;
 
-    expect(controllers).toEqual([BookDockController]);
+    expect(controllers).toEqual([BookDockController, LibraryDockController]);
     expect(providers).toEqual(
       expect.arrayContaining([
         BookDockService,
@@ -37,8 +42,12 @@ describe('BookDockModule', () => {
         BookDockMetadataService,
         BookDockProcessingStateService,
         BookDockFinalizeService,
+        BookDockJoinService,
         BookDockWatcherService,
         BookDockGateway,
+        LibraryDockRepository,
+        LibraryDockRegistry,
+        LibraryDockService,
       ]),
     );
   });

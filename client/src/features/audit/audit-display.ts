@@ -45,6 +45,8 @@ export function isDestructiveAuditAction(action: string): boolean {
     /\.(delete|purge|remove|revoke|clean)$/.test(action) ||
     action.endsWith('.remove_download') ||
     action === AuditAction.BookBulkDelete ||
+    action === AuditAction.BookMerge ||
+    action === AuditAction.BookDuplicatesResolve ||
     action === AuditAction.UserSuperuserDisable ||
     action === AuditAction.OidcIdentityUnlinked
   )
@@ -118,7 +120,8 @@ export function getAuditTargetView(
   return { name: labels.withId(entry.resource, entry.resourceId), unnamed: true, gone, more: 0, typeOnly: false }
 }
 
-export type AuditFactKey = 'format' | 'size' | 'download' | 'dockFile' | 'rejected' | 'failed' | 'cleaned' | 'skipped' | 'remaining' | 'sharingLevel'
+export type AuditFactKey =
+  'format' | 'size' | 'download' | 'dockFile' | 'rejected' | 'failed' | 'cleaned' | 'skipped' | 'remaining' | 'sharingLevel' | 'viaApiKey'
 
 /** The facts an event's meta carries, as plain values the drawer labels. */
 export function getAuditFacts(entry: AuditLogEntry): Array<{ key: AuditFactKey; value: string | number }> {
@@ -143,5 +146,6 @@ export function getAuditFacts(entry: AuditLogEntry): Array<{ key: AuditFactKey; 
     add('remaining', meta.remaining)
   }
   if (entry.action.startsWith('reading_insights.')) add('sharingLevel', meta.sharingLevel)
+  add('viaApiKey', meta.viaApiKey)
   return facts
 }

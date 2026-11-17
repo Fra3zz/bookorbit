@@ -25,6 +25,7 @@ function client(overrides: Partial<DownloadClientItem> = {}): DownloadClientItem
     hasPassword: true,
     category: 'bookorbit',
     useHardlinks: true,
+    removeCompletedDownloads: false,
     allowPrivateAddress: true,
     // Required since a client without one declares no directory the import may read out of.
     pathMappings: [{ id: 1, remotePath: '/downloads', localPath: '/data/torrents' }],
@@ -89,6 +90,34 @@ function fillMapping(remotePath = '/downloads', localPath = '/data/torrents') {
   typeInto('#mapping-local-0', localPath)
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+/** Holds one /validate answer back until the test releases it, simulating a slow round trip. */
+function holdValidationAnswer() {
+  const held = deferred<{ success: boolean; version?: string }>()
+  apiMock.mockImplementationOnce((url: string, init?: RequestInit) =>
+    String(url).endsWith('/validate') && init?.method === 'POST'
+      ? held.promise.then((result) => response(result))
+      : Promise.resolve(response({ clients: [], encryptionConfigured: true })),
+  )
+  return held
+}
+
+async function openTorboxCreate(wrapper: VueWrapper) {
+  await clickInPanel(wrapper, 'Add client')
+  const torbox = sheet().querySelector<HTMLInputElement>('input[name="download-client-type"][value="torbox"]')
+  if (torbox === null) throw new Error('no TorBox client option')
+  torbox.click()
+  clickInSheet('Continue')
+  await flushPromises()
+}
+
 describe('DownloadClientsPanel', () => {
   beforeEach(() => vi.clearAllMocks())
   afterEach(() => {
@@ -128,8 +157,10 @@ describe('DownloadClientsPanel', () => {
       'qbittorrent',
       'transmission',
       'deluge',
+      'rtorrent',
       'nzbget',
       'sabnzbd',
+      'torbox',
     ])
     expect(sheet().querySelector('#download-client-name')).toBeNull()
 
@@ -152,6 +183,7 @@ describe('DownloadClientsPanel', () => {
 
     expect(sheet().querySelector('#download-client-username')).toBeNull()
     expect(sheet().querySelector('label[for="download-client-password"]')?.textContent).toContain('API key')
+    expect(sheet().textContent).toContain('Found in SABnzbd under Config > General')
 
     typeInto('#download-client-name', 'SAB')
     typeInto('#download-client-url', 'http://sabnzbd:8080')
@@ -168,6 +200,204 @@ describe('DownloadClientsPanel', () => {
     expect(JSON.parse(String(saveCall?.[1]?.body))).toMatchObject({ adapterType: 'sabnzbd', password: 'secret-key', username: '' })
   })
 
+  it('asks for the XML-RPC endpoint, with an optional login, when adding rTorrent', async () => {
+    const wrapper = await mountPanel()
+    await clickInPanel(wrapper, 'Add client')
+
+    const rtorrent = sheet().querySelector<HTMLInputElement>('input[name="download-client-type"][value="rtorrent"]')
+    if (rtorrent === null) throw new Error('no rTorrent client option')
+    rtorrent.click()
+    clickInSheet('Continue')
+    await flushPromises()
+
+    const url = sheet().querySelector<HTMLInputElement>('#download-client-url')
+    expect(url?.placeholder).toBe('http://localhost:8000/RPC2')
+    const hintId = url?.getAttribute('aria-describedby') ?? ''
+    expect(hintId).not.toBe('')
+    expect(sheet().querySelector(`[id="${hintId}"]`)?.textContent).toContain('plugins/httprpc/action.php')
+    expect(sheet().querySelector('#download-client-username')).not.toBeNull()
+
+    typeInto('#download-client-name', 'Seedbox')
+    typeInto('#download-client-url', 'http://rtorrent:8000/RPC2')
+    fillMapping()
+    clickInSheet('Save')
+    await flushPromises()
+    const saveCall = apiMock.mock.calls.find(([, init]) => init?.method === 'POST')
+    expect(JSON.parse(String(saveCall?.[1]?.body))).toMatchObject({ adapterType: 'rtorrent', baseUrl: 'http://rtorrent:8000/RPC2' })
+  })
+
+  it('keeps the plain address placeholder and no endpoint hint for other clients', async () => {
+    const wrapper = await mountPanel()
+    await clickInPanel(wrapper, 'Add client')
+    clickInSheet('Continue')
+    await flushPromises()
+
+    const url = sheet().querySelector<HTMLInputElement>('#download-client-url')
+    expect(url?.placeholder).toBe('http://localhost:8080')
+    expect(sheet().textContent).not.toContain('XML-RPC endpoint')
+  })
+
+  it('offers TorBox in the type choices and prefills its URL', async () => {
+    const wrapper = await mountPanel()
+    await clickInPanel(wrapper, 'Add client')
+
+    const torbox = sheet().querySelector<HTMLInputElement>('input[name="download-client-type"][value="torbox"]')
+    expect(torbox).not.toBeNull()
+    torbox?.click()
+    clickInSheet('Continue')
+    await flushPromises()
+
+    expect(sheet().querySelector<HTMLInputElement>('#download-client-url')?.value).toBe('https://api.torbox.app')
+    expect(sheet().textContent).toContain('Can be found at https://torbox.app/settings?section=account')
+    expect(sheet().textContent).not.toContain('SABnzbd under Config')
+  })
+
+  it('names TorBox when its API key is missing', async () => {
+    const wrapper = await mountPanel()
+    await openTorboxCreate(wrapper)
+    typeInto('#download-client-name', 'TorBox')
+
+    clickInSheet('Save')
+    await flushPromises()
+
+    expect(sheet().textContent).toContain('Enter the TorBox API key from the TorBox account settings')
+    expect(sheet().textContent).not.toContain('Enter the SABnzbd API key')
+  })
+
+  it('hides path mappings and saves a TorBox client without mappings', async () => {
+    const wrapper = await mountPanel()
+    await clickInPanel(wrapper, 'Add client')
+
+    const torbox = sheet().querySelector<HTMLInputElement>('input[name="download-client-type"][value="torbox"]')
+    if (torbox === null) throw new Error('no TorBox client option')
+    torbox.click()
+    clickInSheet('Continue')
+    await flushPromises()
+
+    expect(sheet().querySelector('#mapping-remote-0')).toBeNull()
+    typeInto('#download-client-name', 'TorBox')
+    typeInto('#download-client-password', 'api-key')
+    clickInSheet('Save')
+    await flushPromises()
+
+    const saveCall = apiMock.mock.calls.find(([, init]) => init?.method === 'POST')
+    const body = JSON.parse(String(saveCall?.[1]?.body))
+    expect(body).toMatchObject({ adapterType: 'torbox', pathMappings: [] })
+  })
+
+  it('validates a typed TorBox key inline and renders success or failure', async () => {
+    const wrapper = await mountPanel()
+    await clickInPanel(wrapper, 'Add client')
+
+    const torbox = sheet().querySelector<HTMLInputElement>('input[name="download-client-type"][value="torbox"]')
+    if (torbox === null) throw new Error('no TorBox client option')
+    torbox.click()
+    clickInSheet('Continue')
+    await flushPromises()
+
+    expect([...sheet().querySelectorAll('button')].some((button) => button.textContent?.includes('Validate key'))).toBe(false)
+    typeInto('#download-client-password', 'typed-key')
+    await flushPromises()
+    expect([...sheet().querySelectorAll('button')].some((button) => button.textContent?.includes('Validate key'))).toBe(true)
+
+    apiMock.mockImplementation((url: string, init?: RequestInit) =>
+      Promise.resolve(
+        String(url).endsWith('/validate') && init?.method === 'POST'
+          ? response({ success: true, version: 'v1' })
+          : response({ clients: [], encryptionConfigured: true }),
+      ),
+    )
+    clickInSheet('Validate key')
+    await flushPromises()
+
+    const validateCall = apiMock.mock.calls.find(([url, init]) => String(url).endsWith('/validate') && init?.method === 'POST')
+    expect(JSON.parse(String(validateCall?.[1]?.body))).toMatchObject({
+      adapterType: 'torbox',
+      password: 'typed-key',
+      allowPrivateAddress: true,
+    })
+    expect(sheet().textContent).toContain('Connected to TorBox')
+
+    apiMock.mockImplementation((url: string, init?: RequestInit) =>
+      Promise.resolve(
+        String(url).endsWith('/validate') && init?.method === 'POST'
+          ? response({ success: false, error: 'invalid TorBox key' })
+          : response({ clients: [], encryptionConfigured: true }),
+      ),
+    )
+    clickInSheet('Validate key')
+    await flushPromises()
+    expect(sheet().textContent).toContain('invalid TorBox key')
+  })
+
+  it('ignores a key validation that lands after the key was edited', async () => {
+    const wrapper = await mountPanel()
+    await openTorboxCreate(wrapper)
+    typeInto('#download-client-password', 'typed-key')
+    await flushPromises()
+
+    const validation = holdValidationAnswer()
+    clickInSheet('Validate key')
+    typeInto('#download-client-password', 'a-different-key')
+    validation.resolve({ success: true, version: 'v1' })
+    await flushPromises()
+
+    expect(sheet().textContent).not.toContain('Connected to TorBox')
+    const validateButton = [...sheet().querySelectorAll<HTMLButtonElement>('button')].find((button) =>
+      (button.textContent ?? '').includes('Validate key'),
+    )
+    expect(validateButton?.disabled).toBe(false)
+
+    apiMock.mockImplementation((url: string, init?: RequestInit) =>
+      Promise.resolve(
+        String(url).endsWith('/validate') && init?.method === 'POST'
+          ? response({ success: true, version: 'v2' })
+          : response({ clients: [], encryptionConfigured: true }),
+      ),
+    )
+    clickInSheet('Validate key')
+    await flushPromises()
+    expect(sheet().textContent).toContain('Connected to TorBox')
+  })
+
+  it('ignores a key validation that lands after the URL was edited', async () => {
+    const wrapper = await mountPanel()
+    await openTorboxCreate(wrapper)
+    typeInto('#download-client-password', 'typed-key')
+    await flushPromises()
+
+    const validation = holdValidationAnswer()
+    clickInSheet('Validate key')
+    typeInto('#download-client-url', 'https://torbox-proxy.example.com')
+    validation.resolve({ success: true, version: 'v1' })
+    await flushPromises()
+
+    expect(sheet().textContent).not.toContain('Connected to TorBox')
+  })
+
+  it('ignores a key validation that lands after another draft was opened', async () => {
+    const wrapper = await mountPanel()
+    await openTorboxCreate(wrapper)
+    typeInto('#download-client-password', 'typed-key')
+    await flushPromises()
+
+    const validation = holdValidationAnswer()
+    clickInSheet('Validate key')
+
+    await clickInPanel(wrapper, 'Add client')
+    const torbox = sheet().querySelector<HTMLInputElement>('input[name="download-client-type"][value="torbox"]')
+    if (torbox === null) throw new Error('no TorBox client option')
+    torbox.click()
+    clickInSheet('Continue')
+    await flushPromises()
+    typeInto('#download-client-password', 'second-key')
+
+    validation.resolve({ success: true, version: 'v1' })
+    await flushPromises()
+
+    expect(sheet().textContent).not.toContain('Connected to TorBox')
+  })
+
   it('keeps the stored SABnzbd API key when saving an unrelated edit', async () => {
     const wrapper = await mountPanel([client({ name: 'My SABnzbd', adapterType: 'sabnzbd', username: null })])
     await clickInPanel(wrapper, 'Edit My SABnzbd')
@@ -181,6 +411,43 @@ describe('DownloadClientsPanel', () => {
     const body = JSON.parse(String(saveCall?.[1]?.body))
     expect(body.name).toBe('Renamed SABnzbd')
     expect(body).not.toHaveProperty('password')
+  })
+
+  describe('remove completed downloads', () => {
+    const toggle = () => sheet().querySelector<HTMLButtonElement>('#download-client-remove-completed')
+
+    it.each(['sabnzbd', 'nzbget'] as const)('is offered for %s and saved when switched on', async (adapterType) => {
+      const wrapper = await mountPanel([client({ name: 'My Usenet', adapterType, username: null })])
+      await clickInPanel(wrapper, 'Edit My Usenet')
+
+      expect(toggle()?.getAttribute('aria-checked')).toBe('false')
+      toggle()?.click()
+      await flushPromises()
+      clickInSheet('Save')
+      await flushPromises()
+
+      const saveCall = apiMock.mock.calls.find(([, init]) => init?.method === 'PUT')
+      expect(JSON.parse(String(saveCall?.[1]?.body))).toMatchObject({ removeCompletedDownloads: true })
+    })
+
+    it('shows the saved setting when a Usenet client is opened', async () => {
+      const wrapper = await mountPanel([client({ name: 'My SABnzbd', adapterType: 'sabnzbd', username: null, removeCompletedDownloads: true })])
+      await clickInPanel(wrapper, 'Edit My SABnzbd')
+
+      expect(toggle()?.getAttribute('aria-checked')).toBe('true')
+    })
+
+    it('is not offered for a torrent client, which never sends it switched on', async () => {
+      const wrapper = await mountPanel([client()])
+      await clickInPanel(wrapper, 'Edit My qBittorrent')
+
+      expect(toggle()).toBeNull()
+      clickInSheet('Save')
+      await flushPromises()
+
+      const saveCall = apiMock.mock.calls.find(([, init]) => init?.method === 'PUT')
+      expect(JSON.parse(String(saveCall?.[1]?.body))).toMatchObject({ removeCompletedDownloads: false })
+    })
   })
 
   it('keeps the list rendered while a row is being edited', async () => {

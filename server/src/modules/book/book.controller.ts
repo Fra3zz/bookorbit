@@ -21,6 +21,7 @@ import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
 import type { FastifyReply } from 'fastify';
 import { RouteConfig } from '@nestjs/platform-fastify';
+import { KeyReadSafe } from '../../common/decorators/api-key-policy.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { contentDispositionHeader } from '../../common/utils/content-disposition.utils';
@@ -28,8 +29,10 @@ import { fileValidators, planFileResponse, type FileConditionalHeaders } from '.
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import { ForbidPermission } from '../../common/decorators/forbid-permission.decorator';
+import { ResolvesMergedBook } from '../../common/decorators/resolves-merged-book.decorator';
 import { imageContentTypeFromPath } from '../../common/image-content-type';
 import type { RequestUser } from '../../common/types/request-user';
+import { BulkRunsService } from '../bulk-runs/bulk-runs.service';
 import { FileWriteService } from '../file-write/file-write.service';
 import { BookService } from './book.service';
 import { openDeliveryStream } from './delivery-stream';
@@ -58,7 +61,7 @@ import { UpdateBookFileDto } from './dto/update-book-file.dto';
 import { SetStatusDto } from '../user-book-status/dto/set-status.dto';
 import { Permission, AuditAction, AuditResource } from '@bookorbit/types';
 import type { BookDeletionAuditMeta } from '@bookorbit/types';
-import type { BookQuery } from '@bookorbit/types';
+import type { BookIsbnCandidates, BookQuery } from '@bookorbit/types';
 import { UpdateBookMetadataLocksDto } from '../book-metadata-lock/dto/update-book-metadata-locks.dto';
 import { UpdateReadAloudSyncSettingsDto } from './dto/update-read-aloud-sync-settings.dto';
 
@@ -104,6 +107,7 @@ export class BookController {
   constructor(
     private readonly bookService: BookService,
     private readonly fileWriteService: FileWriteService,
+    private readonly bulkRuns: BulkRunsService,
   ) {}
 
   @Post('embed-all')
@@ -151,6 +155,7 @@ export class BookController {
   }
 
   @Post('query')
+  @KeyReadSafe()
   globalQuery(@Body(BookQueryPipe) query: BookQuery, @CurrentUser() user: RequestUser) {
     return this.bookService.globalQuery(user, query);
   }
@@ -158,63 +163,53 @@ export class BookController {
   @Post('bulk-refresh-metadata')
   @RequirePermission(Permission.LibraryEditMetadata)
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk edits')
-  @Auditable({
-    action: AuditAction.BookBulkMetadataRefresh,
-    resource: AuditResource.Book,
-    description: (req) => {
-      const count = (req.body as { bookIds?: number[] })?.bookIds?.length ?? 0;
-      return `Bulk refreshed metadata for ${count} book${count !== 1 ? 's' : ''}`;
-    },
-  })
   async bulkRefreshMetadata(@Body() dto: BulkRefreshMetadataDto, @CurrentUser() user: RequestUser, @Res() reply: FastifyReply) {
     const ids = await this.bookService.resolveSelectionToIds(dto, user, 'editor');
-    const stream = this.createSseStream(reply);
-    try {
-      const result = await this.bookService.bulkRefreshMetadata(
-        ids,
-        user,
-        (event) => {
-          stream.send(event);
-        },
-        { isCancelled: stream.isClosed, ignoreCache: dto.ignoreCache === true },
-      );
-      if (!stream.isClosed()) {
-        stream.send({ done: true, ...result });
-      }
-    } finally {
-      stream.close();
-    }
+    await this.bulkRuns.startAndStream(reply, {
+      kind: 'book-refresh-metadata',
+      subjectIds: ids,
+      options: dto.ignoreCache === true ? { ignoreCache: true } : {},
+      actor: user,
+      audit: {
+        action: AuditAction.BookBulkMetadataRefresh,
+        resource: AuditResource.Book,
+        description: (count) => `Bulk refreshed metadata for ${count} book${count !== 1 ? 's' : ''}`,
+      },
+    });
   }
 
   @Post('bulk-re-extract-cover')
   @RequirePermission(Permission.LibraryEditMetadata)
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk edits')
-  @Auditable({
-    action: AuditAction.BookBulkCoverReextract,
-    resource: AuditResource.Book,
-    description: (req) => {
-      const count = (req.body as { bookIds?: number[] })?.bookIds?.length ?? 0;
-      return `Bulk re-extracted covers for ${count} book${count !== 1 ? 's' : ''}`;
-    },
-  })
   async bulkReExtractCover(@Body() dto: BulkBookIdsDto, @CurrentUser() user: RequestUser, @Res() reply: FastifyReply) {
     const ids = await this.bookService.resolveSelectionToIds(dto, user, 'editor');
-    const stream = this.createSseStream(reply);
-    try {
-      const result = await this.bookService.bulkReExtractCover(
-        ids,
-        user,
-        (bookId) => {
-          stream.send({ bookId });
-        },
-        { isCancelled: stream.isClosed },
-      );
-      if (!stream.isClosed()) {
-        stream.send({ done: true, ...result });
-      }
-    } finally {
-      stream.close();
-    }
+    await this.bulkRuns.startAndStream(reply, {
+      kind: 'book-re-extract-cover',
+      subjectIds: ids,
+      actor: user,
+      audit: {
+        action: AuditAction.BookBulkCoverReextract,
+        resource: AuditResource.Book,
+        description: (count) => `Bulk re-extracted covers for ${count} book${count !== 1 ? 's' : ''}`,
+      },
+    });
+  }
+
+  @Post('bulk-embed-audio-cover')
+  @RequirePermission(Permission.LibraryEditMetadata)
+  @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk edits')
+  async bulkEmbedAudioCover(@Body() dto: BulkBookIdsDto, @CurrentUser() user: RequestUser, @Res() reply: FastifyReply) {
+    const ids = await this.bookService.resolveSelectionToIds(dto, user, 'editor');
+    await this.bulkRuns.startAndStream(reply, {
+      kind: 'book-embed-audio-cover',
+      subjectIds: ids,
+      actor: user,
+      audit: {
+        action: AuditAction.BookBulkEmbedAudioCover,
+        resource: AuditResource.Book,
+        description: (count) => `Bulk embedded audiobook covers for ${count} book${count !== 1 ? 's' : ''}`,
+      },
+    });
   }
 
   @Post(':id/re-extract-cover')
@@ -224,6 +219,7 @@ export class BookController {
   }
 
   @Post('export')
+  @KeyReadSafe()
   @RequirePermission(Permission.LibraryDownload)
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk downloads')
   async exportBooks(@Body() dto: ExportBooksDto, @CurrentUser() user: RequestUser, @Res() reply: FastifyReply) {
@@ -246,6 +242,7 @@ export class BookController {
   }
 
   @Post('metadata-export/preflight')
+  @KeyReadSafe()
   @RequirePermission(Permission.LibraryDownload)
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk downloads')
   metadataExportPreflight(@Body() dto: MetadataExportDto, @CurrentUser() user: RequestUser) {
@@ -253,6 +250,7 @@ export class BookController {
   }
 
   @Post('metadata-export/download')
+  @KeyReadSafe()
   @RequirePermission(Permission.LibraryDownload)
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk downloads')
   async downloadMetadataExport(@Body() dto: MetadataExportDto, @CurrentUser() user: RequestUser, @Res() reply: FastifyReply) {
@@ -340,6 +338,7 @@ export class BookController {
     }
   }
 
+  @ResolvesMergedBook({ params: ['id'] })
   @Get(':id/cover')
   @RouteConfig({ compress: false })
   async getCover(
@@ -368,6 +367,7 @@ export class BookController {
     reply.send(createReadStream(coverPath));
   }
 
+  @ResolvesMergedBook({ params: ['id'] })
   @Get(':id/thumbnail')
   @RouteConfig({ compress: false })
   async getThumbnail(
@@ -572,6 +572,7 @@ export class BookController {
     await this.bookService.deleteFile(fileId, user);
   }
 
+  @ResolvesMergedBook({ params: ['id'] })
   @Get(':id/audio-progress')
   async getAudioProgress(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     return (await this.bookService.getAudioProgress(user.id, id, user)) ?? null;
@@ -583,6 +584,7 @@ export class BookController {
     await this.bookService.saveAudioProgress(user.id, id, dto, user);
   }
 
+  @ResolvesMergedBook({ params: ['id'] })
   @Patch(':id/personal-note')
   updatePersonalNote(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdatePersonalNoteDto, @CurrentUser() user: RequestUser) {
     return this.bookService.updatePersonalNote(id, dto, user);
@@ -670,6 +672,12 @@ export class BookController {
     return this.bookService.getMetadataFromFile(id, user);
   }
 
+  @Get(':id/isbn-candidates')
+  @RequirePermission(Permission.LibraryEditMetadata)
+  getIsbnCandidates(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<BookIsbnCandidates> {
+    return this.bookService.getIsbnCandidates(id, user);
+  }
+
   @Post(':id/write-and-rename')
   @RequirePermission(Permission.LibraryEditMetadata)
   @Auditable({
@@ -680,6 +688,18 @@ export class BookController {
   })
   writeAndRename(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     return this.bookService.writeAndRename(id, user);
+  }
+
+  @Post(':id/embed-audio-cover')
+  @RequirePermission(Permission.LibraryEditMetadata)
+  @Auditable({
+    action: AuditAction.BookEmbedAudioCover,
+    resource: AuditResource.Book,
+    getResourceId: (req) => parseInt(req.params['id'], 10),
+    description: (req) => `Embedded audiobook cover in read-along EPUB of book #${req.params['id']}`,
+  })
+  embedAudioCover(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    return this.bookService.embedAudioCover(id, user);
   }
 
   @Get(':id/write-log')
@@ -706,6 +726,7 @@ export class BookController {
     return this.bookService.updateReadAloudSyncMode(id, dto.mode, user);
   }
 
+  @ResolvesMergedBook({ params: ['id'] })
   @Patch(':id/status')
   setReadStatus(@Param('id', ParseIntPipe) id: number, @Body() dto: SetStatusDto, @CurrentUser() user: RequestUser) {
     return this.bookService.setReadStatus(id, dto, user);
@@ -725,7 +746,7 @@ export class BookController {
   })
   async bulkSetStatus(@Body() dto: BulkSetStatusDto, @CurrentUser() user: RequestUser) {
     const ids = await this.bookService.resolveSelectionToIds(dto, user);
-    return this.bookService.bulkSetStatus(ids, dto.status, user);
+    return this.bookService.bulkSetStatus(ids, dto, user);
   }
 
   @Post('bulk-set-rating')
@@ -853,43 +874,6 @@ export class BookController {
         reply.send(createReadStream(file.path));
         return;
     }
-  }
-
-  private createSseStream(reply: FastifyReply): {
-    send: (event: object) => void;
-    isClosed: () => boolean;
-    close: () => void;
-  } {
-    let disconnected = false;
-    const markDisconnected = () => {
-      disconnected = true;
-    };
-
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    });
-    reply.raw.on('close', markDisconnected);
-    reply.raw.on('aborted', markDisconnected);
-
-    const isClosed = () => disconnected || reply.raw.destroyed || reply.raw.writableEnded;
-    const send = (event: object) => {
-      if (isClosed()) {
-        throw new Error('SSE stream closed');
-      }
-      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-    };
-
-    const close = () => {
-      reply.raw.off('close', markDisconnected);
-      reply.raw.off('aborted', markDisconnected);
-      if (!isClosed()) {
-        reply.raw.end();
-      }
-    };
-
-    return { send, isClosed, close };
   }
 
   private parseBookIdsQuery(raw: string | undefined): number[] {

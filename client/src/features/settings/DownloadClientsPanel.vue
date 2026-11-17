@@ -3,7 +3,12 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Download, Link2, Loader2, Pencil, Plug, Plus, RefreshCw, Trash2, TriangleAlert } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import { DOWNLOAD_CLIENT_CREDENTIAL_KIND, DOWNLOAD_CLIENT_TYPES } from '@bookorbit/types'
+import {
+  DOWNLOAD_CLIENT_CREDENTIAL_KIND,
+  DOWNLOAD_CLIENT_REMOVES_COMPLETED,
+  DOWNLOAD_CLIENT_STAGES_LOCALLY,
+  DOWNLOAD_CLIENT_TYPES,
+} from '@bookorbit/types'
 import type {
   CreateDownloadClientPayload,
   DownloadClientItem,
@@ -49,6 +54,7 @@ interface ClientDraft {
   priority: number
   category: string
   useHardlinks: boolean
+  removeCompletedDownloads: boolean
   allowPrivateAddress: boolean
   pathMappings: MappingDraft[]
 }
@@ -73,6 +79,7 @@ const {
   save,
   remove,
   test,
+  validate,
   testPathMapping,
   reconcile,
   adopt,
@@ -103,6 +110,7 @@ const SAVE_ERROR_KEYS: Record<string, string> = {
   DOWNLOAD_CLIENT_PATH_NOT_ABSOLUTE: 'settings.system.requests.errors.pathNotAbsolute',
   DOWNLOAD_CLIENT_MAPPING_REQUIRED: 'settings.system.requests.errors.mappingRequired',
   DOWNLOAD_CLIENT_CREDENTIAL_REQUIRED: 'settings.system.requests.errors.apiKeyRequired',
+  DOWNLOAD_CLIENT_REMOVE_COMPLETED_UNSUPPORTED: 'settings.system.requests.errors.removeCompletedUnsupported',
   DOWNLOAD_CLIENT_RECONCILIATION_UNSUPPORTED: 'settings.system.requests.reconciliation.unsupported',
   DOWNLOAD_CLIENT_RECONCILIATION_NOT_ORPHAN: 'settings.system.requests.reconciliation.notOrphan',
   DOWNLOAD_CLIENT_RECONCILIATION_NOT_ADOPTABLE: 'settings.system.requests.reconciliation.notAdoptable',
@@ -143,6 +151,7 @@ function emptyDraft(adapterType: DownloadClientType): ClientDraft {
     priority: 1,
     category: 'bookorbit',
     useHardlinks: true,
+    removeCompletedDownloads: false,
     allowPrivateAddress: true,
     // One row to fill in rather than none: a mapping is required, and starting with an empty
     // section reads as optional right up until the save is refused.
@@ -154,6 +163,7 @@ function openDraft(next: ClientDraft) {
   startDraft(next)
   passwordVisible.value = false
   clearFieldErrors()
+  resetKeyCheck()
 }
 
 function startCreate() {
@@ -177,6 +187,7 @@ function startEdit(client: DownloadClientItem) {
     priority: client.priority,
     category: client.category,
     useHardlinks: client.useHardlinks,
+    removeCompletedDownloads: client.removeCompletedDownloads,
     allowPrivateAddress: client.allowPrivateAddress,
     pathMappings: client.pathMappings.map((mapping) => ({ remotePath: mapping.remotePath, localPath: mapping.localPath })),
   })
@@ -198,6 +209,7 @@ function handleNameInput() {
 
 function handleBaseUrlInput() {
   delete fieldErrors.baseUrl
+  resetKeyCheck()
 }
 
 function markPasswordTouched() {
@@ -205,6 +217,7 @@ function markPasswordTouched() {
   draft.value.passwordTouched = draft.value.password.length > 0
   draft.value.passwordCleared = false
   delete fieldErrors.password
+  resetKeyCheck()
 }
 
 const credentialKind = computed(() => (draft.value ? DOWNLOAD_CLIENT_CREDENTIAL_KIND[draft.value.adapterType] : 'usernamePassword'))
@@ -212,9 +225,78 @@ const usesApiKey = computed(() => credentialKind.value === 'apiKey')
 const hasStoredCredential = computed(() => editingClient.value?.hasPassword === true)
 const canClearPassword = computed(() => hasStoredCredential.value && !usesApiKey.value)
 const credentialLabel = computed(() => t(`settings.system.requests.fields.${usesApiKey.value ? 'apiKey' : 'password'}`))
-const credentialBrief = computed(() => t(`settings.system.requests.fields.${usesApiKey.value ? 'apiKeyBrief' : 'passwordBrief'}`))
+const credentialBrief = computed(() => {
+  if (!usesApiKey.value) return t('settings.system.requests.fields.passwordBrief')
+  if (draft.value?.adapterType === 'torbox') return t('settings.system.requests.fields.torboxApiKeyBrief')
+  return t('settings.system.requests.fields.apiKeyBrief')
+})
 const credentialKeep = computed(() => t(`settings.system.requests.fields.${usesApiKey.value ? 'apiKeyKeep' : 'passwordKeep'}`))
 const credentialWillClear = computed(() => t(`settings.system.requests.fields.${usesApiKey.value ? 'apiKeyWillClear' : 'passwordWillClear'}`))
+// rTorrent is the one client whose address is an endpoint rather than a web UI, and pasting the
+// ruTorrent page instead is the mistake its connection test exists to catch.
+const isRtorrent = computed(() => draft.value?.adapterType === 'rtorrent')
+const baseUrlPlaceholder = computed(() => (isRtorrent.value ? 'http://localhost:8000/RPC2' : 'http://localhost:8080'))
+const baseUrlBrief = computed(() => (isRtorrent.value ? t('settings.system.requests.fields.baseUrlRtorrentBrief') : undefined))
+
+const stagesLocally = computed(() => (draft.value ? DOWNLOAD_CLIENT_STAGES_LOCALLY[draft.value.adapterType] : false))
+const removesCompleted = computed(() => (draft.value ? DOWNLOAD_CLIENT_REMOVES_COMPLETED[draft.value.adapterType] : false))
+
+const validating = ref(false)
+const keyCheck = ref<'idle' | 'ok' | 'invalid'>('idle')
+const keyCheckMessage = ref('')
+const canValidateKey = computed(() => {
+  const current = draft.value
+  return current !== null && current.adapterType === 'torbox' && current.passwordTouched && current.password.trim().length > 0
+})
+
+function resetKeyCheck() {
+  keyCheck.value = 'idle'
+  keyCheckMessage.value = ''
+}
+
+async function handleValidateKey() {
+  const current = draft.value
+  if (!current) return
+  // The answer only speaks for the fields as they were sent: an edit, or another draft opened,
+  // while the round trip is in flight makes it stale, and a stale "ok" would vouch for a key
+  // that was never tested.
+  const sent = {
+    baseUrl: current.baseUrl,
+    password: current.password,
+    allowPrivateAddress: current.allowPrivateAddress,
+  }
+  validating.value = true
+  resetKeyCheck()
+  try {
+    const result = await validate({
+      adapterType: current.adapterType,
+      baseUrl: current.baseUrl.trim() || TORBOX_DEFAULT_URL,
+      username: current.username.trim(),
+      password: current.password,
+      allowPrivateAddress: current.allowPrivateAddress,
+    })
+    if (
+      draft.value !== current ||
+      current.baseUrl !== sent.baseUrl ||
+      current.password !== sent.password ||
+      current.allowPrivateAddress !== sent.allowPrivateAddress
+    ) {
+      return
+    }
+    const client = t(`settings.system.requests.clientTypes.${current.adapterType}`)
+    if (result.success) {
+      keyCheck.value = 'ok'
+      keyCheckMessage.value = result.version
+        ? t('settings.system.requests.testOk', { client, version: result.version })
+        : t('settings.system.requests.testOkNoVersion', { client })
+    } else {
+      keyCheck.value = 'invalid'
+      keyCheckMessage.value = result.error ?? t('settings.system.requests.errors.testFailed')
+    }
+  } finally {
+    validating.value = false
+  }
+}
 
 // Watched rather than reset in the picker's handler: the create form changes the type through its
 // own select, and a username left behind there is saved, hidden by the form it was saved from, and
@@ -222,6 +304,24 @@ const credentialWillClear = computed(() => t(`settings.system.requests.fields.${
 watch(usesApiKey, (apiKey) => {
   if (apiKey && draft.value) draft.value.username = ''
 })
+
+const TORBOX_DEFAULT_URL = 'https://api.torbox.app'
+
+const apiKeyRequiredMessage = computed(() =>
+  draft.value?.adapterType === 'torbox'
+    ? t('settings.system.requests.errors.torboxApiKeyRequired')
+    : t('settings.system.requests.errors.apiKeyRequired'),
+)
+
+// Start with TorBox's hosted endpoint while keeping it editable for a private reverse proxy.
+watch(
+  () => draft.value?.adapterType,
+  (type, previous) => {
+    if (!draft.value || !type || type === previous) return
+    resetKeyCheck()
+    if (type === 'torbox' && !draft.value.baseUrl.trim()) draft.value.baseUrl = TORBOX_DEFAULT_URL
+  },
+)
 
 function toggleClearPassword() {
   const current = draft.value
@@ -293,6 +393,7 @@ function toPayload(current: ClientDraft): CreateDownloadClientPayload | UpdateDo
     priority: current.priority,
     category: current.category.trim(),
     useHardlinks: current.useHardlinks,
+    removeCompletedDownloads: DOWNLOAD_CLIENT_REMOVES_COMPLETED[current.adapterType] && current.removeCompletedDownloads,
     allowPrivateAddress: current.allowPrivateAddress,
     pathMappings: filledMappings(current),
   }
@@ -314,13 +415,13 @@ async function handleSave() {
   clearFieldErrors()
   if (!current.name.trim()) fieldErrors.name = t('settings.system.requests.errors.nameRequired')
   if (!current.baseUrl.trim()) fieldErrors.baseUrl = t('settings.system.requests.errors.urlRequired')
-  if (current.adapterType === 'sabnzbd' && current.id === null && !current.password.trim()) {
-    fieldErrors.password = t('settings.system.requests.errors.apiKeyRequired')
+  if (usesApiKey.value && current.id === null && !current.password.trim()) {
+    fieldErrors.password = apiKeyRequiredMessage.value
   }
-  if (current.adapterType === 'sabnzbd' && current.id !== null && !hasStoredCredential.value && !current.password.trim()) {
-    fieldErrors.password = t('settings.system.requests.errors.apiKeyRequired')
+  if (usesApiKey.value && current.id !== null && !hasStoredCredential.value && !current.password.trim()) {
+    fieldErrors.password = apiKeyRequiredMessage.value
   }
-  if (filledMappings(current).length === 0) fieldErrors.mappings = t('settings.system.requests.errors.mappingRequired')
+  if (!stagesLocally.value && filledMappings(current).length === 0) fieldErrors.mappings = t('settings.system.requests.errors.mappingRequired')
   if (Object.keys(fieldErrors).length > 0) return
 
   const failure = await save(current.id, toPayload(current))
@@ -444,7 +545,7 @@ async function confirmOrphanRemoval() {
       v-if="clients.length === 0"
       :title="t('settings.system.requests.clientsEmpty.title')"
       :body="t('settings.system.requests.clientsEmpty.body')"
-      :note="t('settings.system.requests.clientsEmpty.note')"
+      :note="t('settings.system.requests.clientsEmpty.noteWithTorbox')"
     >
       <template #icon>
         <Download :size="18" />
@@ -706,14 +807,20 @@ async function confirmOrphanRemoval() {
             </SettingsField>
           </div>
 
-          <SettingsField :label="t('settings.system.requests.fields.baseUrl')" input-id="download-client-url" required :error="fieldErrors.baseUrl">
+          <SettingsField
+            :label="t('settings.system.requests.fields.baseUrl')"
+            input-id="download-client-url"
+            required
+            :brief="baseUrlBrief"
+            :error="fieldErrors.baseUrl"
+          >
             <template #default="{ describedBy, invalid }">
               <input
                 id="download-client-url"
                 v-model="draft.baseUrl"
                 type="url"
                 class="settings-control font-mono text-[13px]"
-                placeholder="http://localhost:8080"
+                :placeholder="baseUrlPlaceholder"
                 :aria-describedby="describedBy"
                 :aria-invalid="invalid || undefined"
                 @input="handleBaseUrlInput"
@@ -767,6 +874,14 @@ async function confirmOrphanRemoval() {
                   }}
                 </Button>
               </div>
+              <div v-if="canValidateKey" class="mt-2 flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="outline" class="h-8" :disabled="validating" @click="handleValidateKey">
+                  <Loader2 v-if="validating" class="animate-spin" aria-hidden="true" />
+                  {{ t('settings.system.requests.validateKey') }}
+                </Button>
+                <span v-if="keyCheck === 'ok'" role="status" class="text-xs text-muted-foreground">{{ keyCheckMessage }}</span>
+                <span v-else-if="keyCheck === 'invalid'" role="alert" class="text-xs text-destructive">{{ keyCheckMessage }}</span>
+              </div>
             </template>
           </SettingsField>
         </SettingsSection>
@@ -815,6 +930,13 @@ async function confirmOrphanRemoval() {
               :brief="t('settings.system.requests.fields.useHardlinksBrief')"
             />
             <SettingsToggleField
+              v-if="removesCompleted"
+              v-model="draft.removeCompletedDownloads"
+              :label="t('settings.system.requests.fields.removeCompletedDownloads')"
+              input-id="download-client-remove-completed"
+              :brief="t('settings.system.requests.fields.removeCompletedDownloadsBrief')"
+            />
+            <SettingsToggleField
               v-model="draft.allowPrivateAddress"
               :label="t('settings.system.requests.fields.allowPrivateAddress')"
               input-id="download-client-allow-private"
@@ -823,7 +945,11 @@ async function confirmOrphanRemoval() {
           </div>
         </SettingsSection>
 
-        <SettingsSection :title="t('settings.system.requests.mappings.title')" :brief="t('settings.system.requests.mappings.brief')">
+        <SettingsSection
+          v-if="!stagesLocally"
+          :title="t('settings.system.requests.mappings.title')"
+          :brief="t('settings.system.requests.mappings.brief')"
+        >
           <p v-if="fieldErrors.mappings" role="alert" class="text-xs text-destructive">{{ fieldErrors.mappings }}</p>
           <p class="text-xs text-muted-foreground">{{ t('settings.system.requests.mappings.identityExample') }}</p>
 

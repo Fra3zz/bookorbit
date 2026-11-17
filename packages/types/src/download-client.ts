@@ -6,7 +6,7 @@ import type { IndexerColor, ReleaseUnitChoice } from "./indexer";
  * deliberately absent: it has no address, no credentials and nothing to choose, so making it a
  * configurable client type would only ask an operator to create a record of nothing.
  */
-export const DOWNLOAD_CLIENT_TYPES = ["qbittorrent", "transmission", "deluge", "nzbget", "sabnzbd"] as const;
+export const DOWNLOAD_CLIENT_TYPES = ["qbittorrent", "transmission", "deluge", "rtorrent", "nzbget", "sabnzbd", "torbox"] as const;
 export type DownloadClientType = (typeof DOWNLOAD_CLIENT_TYPES)[number];
 
 /**
@@ -20,8 +20,10 @@ export const DOWNLOAD_CLIENT_DELIVERY: Record<DownloadClientType, DownloadDelive
   qbittorrent: "torrent",
   transmission: "torrent",
   deluge: "torrent",
+  rtorrent: "torrent",
   nzbget: "usenet",
   sabnzbd: "usenet",
+  torbox: "torrent",
 };
 
 export type DownloadClientCredentialKind = "usernamePassword" | "apiKey";
@@ -31,8 +33,53 @@ export const DOWNLOAD_CLIENT_CREDENTIAL_KIND: Record<DownloadClientType, Downloa
   qbittorrent: "usernamePassword",
   transmission: "usernamePassword",
   deluge: "usernamePassword",
+  rtorrent: "usernamePassword",
   nzbget: "usernamePassword",
   sabnzbd: "apiKey",
+  torbox: "apiKey",
+};
+
+/**
+ * A cloud client fetches finished files into BookOrbit's own staging root instead of exposing a
+ * filesystem the import could map, so it needs no path mappings and the form hides them.
+ */
+export const DOWNLOAD_CLIENT_STAGES_LOCALLY: Record<DownloadClientType, boolean> = {
+  qbittorrent: false,
+  transmission: false,
+  deluge: false,
+  rtorrent: false,
+  nzbget: false,
+  sabnzbd: false,
+  torbox: true,
+};
+
+/**
+ * A cloud client offers no way to hand a download back: removing it from BookOrbit deletes the
+ * item and its files on the client's side whatever the operator chose, so the UI must say that
+ * rather than promise a copy nothing can keep.
+ */
+export const DOWNLOAD_CLIENT_ALWAYS_DELETES_REMOTE: Record<DownloadClientType, boolean> = {
+  qbittorrent: false,
+  transmission: false,
+  deluge: false,
+  rtorrent: false,
+  nzbget: false,
+  sabnzbd: false,
+  torbox: true,
+};
+
+/**
+ * Whether a client may drop a download and its files once it is imported. A Usenet job has
+ * nothing left to do after that; a torrent is still seeding, and removing it is the operator's call.
+ */
+export const DOWNLOAD_CLIENT_REMOVES_COMPLETED: Record<DownloadClientType, boolean> = {
+  qbittorrent: false,
+  transmission: false,
+  deluge: false,
+  rtorrent: false,
+  nzbget: true,
+  sabnzbd: true,
+  torbox: false,
 };
 
 export interface DownloadClientPathMapping {
@@ -59,6 +106,7 @@ export const DOWNLOAD_CLIENT_ERROR_CODES = [
   "DOWNLOAD_CLIENT_PATH_NOT_ABSOLUTE",
   "DOWNLOAD_CLIENT_MAPPING_REQUIRED",
   "DOWNLOAD_CLIENT_CREDENTIAL_REQUIRED",
+  "DOWNLOAD_CLIENT_REMOVE_COMPLETED_UNSUPPORTED",
   /** The test ran and the client refused or could not be reached. Carries the adapter's reason. */
   "DOWNLOAD_CLIENT_TEST_FAILED",
   "DOWNLOAD_CLIENT_RECONCILIATION_UNSUPPORTED",
@@ -81,6 +129,8 @@ export interface DownloadClientItem {
   hasPassword: boolean;
   category: string;
   useHardlinks: boolean;
+  /** Only ever true for a client `DOWNLOAD_CLIENT_REMOVES_COMPLETED` allows. */
+  removeCompletedDownloads: boolean;
   /** Download clients usually sit on the LAN, so reaching a private address is opt-in per row. */
   allowPrivateAddress: boolean;
   lastTestedAt: string | null;
@@ -156,11 +206,26 @@ export interface CreateDownloadClientPayload {
   priority?: number;
   category?: string;
   useHardlinks?: boolean;
+  /** Defaults to false, which keeps every download in the client as before. */
+  removeCompletedDownloads?: boolean;
   allowPrivateAddress?: boolean;
   pathMappings?: DownloadClientPathMappingInput[];
 }
 
 export type UpdateDownloadClientPayload = Partial<Omit<CreateDownloadClientPayload, "adapterType">>;
+
+/**
+ * What the settings form sends to check a credential before anything is saved: enough to reach a
+ * client and nothing persisted, so an operator finds out their API key is wrong while they are
+ * still looking at the field they typed it into.
+ */
+export interface ValidateDownloadClientPayload {
+  adapterType: DownloadClientType;
+  baseUrl: string;
+  username?: string | null;
+  password?: string | null;
+  allowPrivateAddress?: boolean;
+}
 
 export interface DownloadClientTestResult {
   success: boolean;
@@ -240,6 +305,11 @@ export interface BookRequestDownloadItem {
   downloadClientId: number | null;
   downloadClientName: string | null;
   downloadClientColor: IndexerColor | null;
+  /**
+   * True when this attempt is held by a client that deletes it, files included, when removed:
+   * the operator is not offered a copy that client cannot keep.
+   */
+  alwaysDeletesRemote: boolean;
   source: BookRequestDownloadSource;
   /** Where the release came from, and null once that indexer row has been deleted. */
   indexerId: number | null;
@@ -281,6 +351,8 @@ export interface BookRequestSeedStatus {
   downloadClientId: number;
   downloadClientName: string | null;
   clientKey: string;
+  /** True when removing this torrent deletes it and its files on the client's side for good. */
+  alwaysDeletesRemote: boolean;
   /** False once the client has stopped the torrent, whether by goal, by pause or by error. */
   seeding: boolean;
   ratio: number | null;

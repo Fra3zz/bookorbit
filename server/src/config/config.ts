@@ -83,6 +83,8 @@ export const readAloudConfig = registerAs('readAloud', () => {
 export const audioToolsConfig = registerAs('audioTools', () => ({
   ffmpegPath: process.env.FFMPEG_PATH?.trim() || 'ffmpeg',
   ffprobePath: process.env.FFPROBE_PATH?.trim() || 'ffprobe',
+  /** How scans read each audio file's length and chapters; `ffprobe` is the escape hatch from the in-process reader. */
+  scanReader: process.env.AUDIO_SCAN_READER?.trim().toLowerCase() === 'ffprobe' ? ('ffprobe' as const) : ('builtin' as const),
 }));
 
 export const emailConfig = registerAs('email', () => ({
@@ -101,6 +103,19 @@ export const migrationConfig = registerAs('migration', () => ({
  */
 export const bookRequestConfig = registerAs('bookRequest', () => ({
   encryptionKey: process.env.BOOK_REQUEST_ENCRYPTION_KEY ?? '',
+}));
+
+/**
+ * Keys for AI provider connections. Like the book request key, a provider key is refused rather
+ * than stored in the clear when this is unset; connections without a key still save.
+ */
+export const aiConfig = registerAs('ai', () => ({
+  encryptionKey: process.env.AI_ENCRYPTION_KEY ?? '',
+}));
+
+/** How many bulk runs the server works through at once, across every account. */
+export const bulkRunsConfig = registerAs('bulkRuns', () => ({
+  maxConcurrent: Number(process.env.BULK_RUNS_MAX_CONCURRENT ?? 3),
 }));
 
 export const oidcRuntimeConfig = registerAs('oidcRuntime', () => ({

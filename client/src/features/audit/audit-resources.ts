@@ -21,6 +21,7 @@ const domainByResource: Record<AuditResource, AuditResourceDomain> = {
   [AuditResource.Collection]: 'content',
   [AuditResource.SmartScope]: 'content',
   [AuditResource.BookDockFile]: 'content',
+  [AuditResource.LibraryDock]: 'settings',
   [AuditResource.BookRequest]: 'content',
   [AuditResource.DownloadClient]: 'integrations',
   [AuditResource.RequestIndexer]: 'integrations',
@@ -40,7 +41,10 @@ const domainByResource: Record<AuditResource, AuditResourceDomain> = {
   [AuditResource.Series]: 'metadata',
   [AuditResource.OidcIdentity]: 'integrations',
   [AuditResource.MagicLinkToken]: 'integrations',
+  [AuditResource.ApiKey]: 'integrations',
   [AuditResource.ReadingInsightsProfile]: 'insights',
+  [AuditResource.AiConnection]: 'integrations',
+  [AuditResource.AiSettings]: 'settings',
 }
 
 const badgeClassByDomain: Record<AuditResourceDomain, string> = {

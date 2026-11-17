@@ -1,7 +1,13 @@
 import { realignAudioTrackOrder } from '../../db/audio-track-order';
-import { recordBookFileHashHistory, deleteBookFilesWithHashInvalidation, deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
+import {
+  bumpKoreaderHashRevisions,
+  recordBookFileHashHistory,
+  deleteBookFilesWithHashInvalidation,
+  deleteBooksWithHashInvalidation,
+} from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
+import type { JobView } from '@bookorbit/types';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
@@ -24,12 +30,60 @@ import {
   users,
 } from '../../db/schema';
 import { rankFileRowsByBook } from '../../common/utils/primary-file-selection.utils';
+import { afterPosition, keysetOrder, microseconds, type JobKey, type JobPosition, type KeysetColumns } from '../jobs/job-keyset';
+import type { LibraryRoot } from './lib/library-roots';
 
 type Db = NodePgDatabase<typeof schema>;
 type DbTransaction = Parameters<Parameters<Db['transaction']>[0]>[0];
 type MoveBookToLibraryResult = Pick<typeof books.$inferSelect, 'id' | 'libraryId' | 'libraryFolderId' | 'folderPath' | 'status' | 'primaryFileId'> & {
   previousLibraryId: number;
   libraryChanged: boolean;
+};
+
+const CLAIM_LOOKUP_BATCH_SIZE = 1000;
+
+/** When a finished scan ended, never null, so no row drops out of a keyset comparison. */
+const SCAN_FINISH = sql`coalesce(${scanJobs.completedAt}, ${scanJobs.startedAt})`;
+
+/**
+ * Finished scans History may list: automatic scans that changed nothing are left out. Written with
+ * literals so the planner can match it to the partial index that carries the same predicate.
+ */
+const SCAN_LISTED = sql`(${scanJobs.status} in ('completed', 'failed') and not (${scanJobs.status} = 'completed' and ${scanJobs.triggeredBy} <> 'manual' and ${scanJobs.addedCount} = 0 and ${scanJobs.updatedCount} = 0 and ${scanJobs.missingCount} = 0))`;
+
+export interface ScanJobPageQuery {
+  view: JobView;
+  /** Libraries the viewer can access; null for every library. */
+  libraryIds: readonly number[] | null;
+  /** Failed scans that finished at or before this have aged into History. */
+  cutoffAt: Date;
+  after: JobPosition | null;
+  typeIndex: number;
+  limit: number;
+}
+
+export interface ScanJobPageRow {
+  id: number;
+  libraryId: number;
+  status: string;
+  triggeredBy: string;
+  startedAt: Date;
+  completedAt: Date | null;
+  key: JobKey;
+}
+
+export interface ScanJobCounts {
+  running: number;
+  failed: number;
+}
+
+const SCAN_PAGE_COLUMNS = {
+  id: scanJobs.id,
+  libraryId: scanJobs.libraryId,
+  status: scanJobs.status,
+  triggeredBy: scanJobs.triggeredBy,
+  startedAt: scanJobs.startedAt,
+  completedAt: scanJobs.completedAt,
 };
 
 @Injectable()
@@ -98,10 +152,168 @@ export class ScannerRepository {
       .orderBy(scanJobs.libraryId, desc(scanJobs.startedAt));
   }
 
+  /**
+   * A page of scans for the Jobs area, in the view's keyset order. Scans never queue or wait on a
+   * person: the Queue holds running scans only and Needs you is empty.
+   */
+  async pageForJobs(query: ScanJobPageQuery): Promise<ScanJobPageRow[]> {
+    if (query.view === 'needs-you' || query.libraryIds?.length === 0) return [];
+    return query.view === 'queue' ? await this.runningPage(query) : await this.settledPage(query);
+  }
+
+  /** Running scans and failed scans still inside the Failed window, in the libraries given. */
+  async countForJobs(libraryIds: readonly number[] | null, cutoffAt: Date): Promise<ScanJobCounts> {
+    if (libraryIds?.length === 0) return { running: 0, failed: 0 };
+    const failed = this.failedShown(cutoffAt);
+    const [row] = await this.db
+      .select({
+        running: sql<number>`count(*) filter (where ${scanJobs.status} = 'running')`.mapWith(Number),
+        failed: sql<number>`count(*) filter (where ${failed})`.mapWith(Number),
+      })
+      .from(scanJobs)
+      .where(and(or(eq(scanJobs.status, 'running'), failed), this.inLibraries(libraryIds)));
+    return { running: row?.running ?? 0, failed: row?.failed ?? 0 };
+  }
+
+  /** The scans with these ids, for answering an action on them. */
+  async findScanJobsByIds(ids: readonly number[]): Promise<Pick<ScanJobPageRow, 'id' | 'libraryId' | 'status'>[]> {
+    if (ids.length === 0) return [];
+    return await this.db
+      .select({ id: scanJobs.id, libraryId: scanJobs.libraryId, status: scanJobs.status })
+      .from(scanJobs)
+      .where(inArray(scanJobs.id, [...ids]));
+  }
+
+  /** Library names for the scans a page of jobs is about. */
+  async findLibraryNames(libraryIds: readonly number[]): Promise<Map<number, string>> {
+    if (libraryIds.length === 0) return new Map();
+    const rows = await this.db
+      .select({ id: libraries.id, name: libraries.name })
+      .from(libraries)
+      .where(inArray(libraries.id, [...libraryIds]));
+    return new Map(rows.map((row) => [row.id, row.name]));
+  }
+
+  /**
+   * Deletes up to `limit` finished scans that ended before `before`. Each library keeps its newest
+   * scan and its newest completed scan, which the library overview, the "Scanned X ago" header and
+   * the "never scanned" check read. Returns how many went.
+   */
+  async deleteFinishedScanJobsBefore(before: Date, limit: number): Promise<number> {
+    const result = await this.db.execute(sql`
+      delete from ${scanJobs}
+      where id in (
+        select s.id from ${scanJobs} s
+        where s.status in ('completed', 'failed')
+          and coalesce(s.completed_at, s.started_at) < ${before}
+          and s.id <> (select k.id from ${scanJobs} k where k.library_id = s.library_id order by k.started_at desc, k.id desc limit 1)
+          and s.id is distinct from (
+            select k.id from ${scanJobs} k where k.library_id = s.library_id and k.status = 'completed' order by k.started_at desc, k.id desc limit 1
+          )
+        order by s.id
+        limit ${limit}
+      )`);
+    return result.rowCount ?? 0;
+  }
+
+  /** Running scans, oldest first. Several can run at once, one per library. */
+  private async runningPage(query: ScanJobPageQuery): Promise<ScanJobPageRow[]> {
+    const at = microseconds(sql`${scanJobs.startedAt}`);
+    // Every running scan sits in the first band at rank 0. Cast, since a bare 0 in ORDER BY names a column position.
+    const band = sql`0::integer`;
+    const columns: KeysetColumns = {
+      prefix: [
+        { kind: 'number', expr: band },
+        { kind: 'number', expr: band },
+      ],
+      suffix: [{ kind: 'number', expr: at }],
+      id: { kind: 'number', expr: sql`${scanJobs.id}` },
+    };
+    const rows = await this.db
+      .select({ ...SCAN_PAGE_COLUMNS, at })
+      .from(scanJobs)
+      .where(
+        and(
+          eq(scanJobs.status, 'running'),
+          this.inLibraries(query.libraryIds),
+          query.after ? afterPosition(columns, 'queue', query.after, query.typeIndex) : undefined,
+        ),
+      )
+      .orderBy(...keysetOrder(columns, 'queue'))
+      .limit(query.limit);
+    return rows.map(({ at: since, ...row }) => ({ ...row, key: { prefix: [0, 0], suffix: [since], id: row.id } }));
+  }
+
+  /** Failed and History by when the scan finished, newest first. */
+  private async settledPage(query: ScanJobPageQuery): Promise<ScanJobPageRow[]> {
+    const columns: KeysetColumns = { prefix: [{ kind: 'time', expr: SCAN_FINISH }], suffix: [], id: { kind: 'number', expr: sql`${scanJobs.id}` } };
+    const rows = await this.db
+      .select({ ...SCAN_PAGE_COLUMNS, finish: microseconds(SCAN_FINISH) })
+      .from(scanJobs)
+      .where(
+        and(
+          query.view === 'failed' ? this.failedShown(query.cutoffAt) : this.historyShown(query.cutoffAt),
+          this.inLibraries(query.libraryIds),
+          query.after ? afterPosition(columns, query.view, query.after, query.typeIndex) : undefined,
+        ),
+      )
+      .orderBy(...keysetOrder(columns, query.view))
+      .limit(query.limit);
+    return rows.map(({ finish, ...row }) => ({ ...row, key: { prefix: [finish], suffix: [], id: row.id } }));
+  }
+
+  /** Failed and finished after the cutoff: what the Failed view still shows. */
+  private failedShown(cutoffAt: Date): SQL {
+    return and(SCAN_LISTED, eq(scanJobs.status, 'failed'), sql`${SCAN_FINISH} > ${cutoffAt}`)!;
+  }
+
+  /** Completed scans worth listing, and failed ones that have aged out of Failed. */
+  private historyShown(cutoffAt: Date): SQL {
+    return and(SCAN_LISTED, or(ne(scanJobs.status, 'failed'), sql`${SCAN_FINISH} <= ${cutoffAt}`))!;
+  }
+
+  private inLibraries(libraryIds: readonly number[] | null): SQL | undefined {
+    return libraryIds === null ? undefined : inArray(scanJobs.libraryId, [...libraryIds]);
+  }
+
   // ── Library Folders ────────────────────────────────────────────────────────
 
   async findLibraryFolders(libraryId: number) {
     return this.db.select().from(libraryFolders).where(eq(libraryFolders.libraryId, libraryId));
+  }
+
+  /** Every library's folders, which decide who owns a path when folders overlap. */
+  async findAllLibraryRoots(): Promise<LibraryRoot[]> {
+    return this.db.select({ id: libraryFolders.id, libraryId: libraryFolders.libraryId, path: libraryFolders.path }).from(libraryFolders);
+  }
+
+  /**
+   * Books filed under one of `fromFolderIds` at one of these folder paths, which now belong to a
+   * folder of `libraryId`. One that library already has a book at is left where it is: moving it
+   * would collide with that book.
+   */
+  async findBooksToClaim(
+    fromFolderIds: readonly number[],
+    libraryId: number,
+    folderPaths: readonly string[],
+  ): Promise<Array<{ id: number; libraryId: number; folderPath: string }>> {
+    if (fromFolderIds.length === 0 || folderPaths.length === 0) return [];
+    const found: Array<{ id: number; libraryId: number; folderPath: string }> = [];
+    for (let index = 0; index < folderPaths.length; index += CLAIM_LOOKUP_BATCH_SIZE) {
+      const batch = folderPaths.slice(index, index + CLAIM_LOOKUP_BATCH_SIZE);
+      const rows = await this.db
+        .select({ id: books.id, libraryId: books.libraryId, folderPath: books.folderPath })
+        .from(books)
+        .where(
+          and(
+            inArray(books.libraryFolderId, [...fromFolderIds]),
+            inArray(books.folderPath, batch),
+            sql`not exists (select 1 from ${books} mine where mine.library_id = ${libraryId} and mine.folder_path = ${books.folderPath} and mine.id <> ${books.id})`,
+          ),
+        );
+      found.push(...rows);
+    }
+    return found;
   }
 
   async findLibrarySettings(libraryId: number) {
@@ -128,15 +340,6 @@ export class ScannerRepository {
   async findLibraryName(libraryId: number): Promise<string | null> {
     const [row] = await this.db.select({ name: libraries.name }).from(libraries).where(eq(libraries.id, libraryId)).limit(1);
     return row?.name ?? null;
-  }
-
-  async hasLibraryAccess(userId: number, libraryId: number): Promise<boolean> {
-    const [row] = await this.db
-      .select({ userId: userLibraryAccess.userId })
-      .from(userLibraryAccess)
-      .where(and(eq(userLibraryAccess.userId, userId), eq(userLibraryAccess.libraryId, libraryId)))
-      .limit(1);
-    return row !== undefined;
   }
 
   async findLibraryAccessibleUserIds(libraryId: number): Promise<number[]> {
@@ -325,9 +528,15 @@ export class ScannerRepository {
 
   async updateBookFile(id: number, data: Partial<typeof bookFiles.$inferInsert>) {
     return this.db.transaction(async (tx) => {
-      if (data.fileHash) {
-        const [previous] = await tx.select({ fileHash: bookFiles.fileHash }).from(bookFiles).where(eq(bookFiles.id, id)).for('update');
-        if (previous?.fileHash && previous.fileHash !== data.fileHash) {
+      let previousBookId: number | null = null;
+      if (data.fileHash || data.bookId !== undefined) {
+        const [previous] = await tx
+          .select({ fileHash: bookFiles.fileHash, bookId: bookFiles.bookId })
+          .from(bookFiles)
+          .where(eq(bookFiles.id, id))
+          .for('update');
+        previousBookId = previous?.bookId ?? null;
+        if (data.fileHash && previous?.fileHash && previous.fileHash !== data.fileHash) {
           await recordBookFileHashHistory(tx, id, previous.fileHash, 'rescan');
           // Positions from the replaced bytes cannot be interpreted in the new DOM.
           await tx
@@ -357,8 +566,65 @@ export class ScannerRepository {
         .set({ ...data, updatedAt: new Date() })
         .where(eq(bookFiles.id, id))
         .returning();
+      if (file && data.bookId !== undefined && previousBookId !== null && previousBookId !== data.bookId) {
+        await this.moveAudiobookProgressForReassignedFile(tx, id, previousBookId, data.bookId);
+      }
       return file;
     });
+  }
+
+  private async moveAudiobookProgressForReassignedFile(
+    tx: DbTransaction,
+    fileId: number,
+    previousBookId: number,
+    destinationBookId: number,
+  ): Promise<void> {
+    const sourceRows = await tx
+      .select()
+      .from(audiobookProgress)
+      .where(and(eq(audiobookProgress.bookId, previousBookId), eq(audiobookProgress.currentFileId, fileId)))
+      .for('update');
+
+    for (const source of sourceRows) {
+      const [destination] = await tx
+        .select()
+        .from(audiobookProgress)
+        .where(and(eq(audiobookProgress.userId, source.userId), eq(audiobookProgress.bookId, destinationBookId)))
+        .for('update')
+        .limit(1);
+
+      if (!destination) {
+        await tx
+          .update(audiobookProgress)
+          .set({
+            bookId: destinationBookId,
+            revision: sql`${audiobookProgress.revision} + 1`,
+            operationId: null,
+            manifestRevision: null,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(audiobookProgress.userId, source.userId), eq(audiobookProgress.bookId, previousBookId)));
+        continue;
+      }
+
+      if (source.capturedAt > destination.capturedAt) {
+        await tx
+          .update(audiobookProgress)
+          .set({
+            currentFileId: source.currentFileId,
+            positionSeconds: source.positionSeconds,
+            percentage: source.percentage,
+            capturedAt: source.capturedAt,
+            revision: sql`${audiobookProgress.revision} + 1`,
+            operationId: null,
+            manifestRevision: null,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(audiobookProgress.userId, source.userId), eq(audiobookProgress.bookId, destinationBookId)));
+      }
+
+      await tx.delete(audiobookProgress).where(and(eq(audiobookProgress.userId, source.userId), eq(audiobookProgress.bookId, previousBookId)));
+    }
   }
 
   async findBookFileByAbsolutePath(absolutePath: string, libraryId?: number) {
@@ -456,6 +722,7 @@ export class ScannerRepository {
           status: books.status,
           primaryFileId: books.primaryFileId,
         });
+      if (book && libraryChanged) await bumpKoreaderHashRevisions(tx, [current.libraryId, libraryId]);
       return book ? { ...book, previousLibraryId: current.libraryId, libraryChanged } : null;
     });
   }
@@ -610,6 +877,8 @@ export class ScannerRepository {
     sourceFileId: number;
     duplicateBookId: number;
     duplicateFileId: number;
+    /** Folds the duplicate into the moved book when readers have data on it; false leaves it to be deleted. */
+    absorbDuplicate?: (tx: DbTransaction) => Promise<boolean>;
   }): Promise<{ bookId: number; libraryId: number; duplicateBookId: number } | null> {
     return this.db.transaction(async (tx) => {
       const [source] = await tx
@@ -637,7 +906,8 @@ export class ScannerRepository {
         .limit(1);
       if (!duplicate || duplicate.bookId === input.sourceBookId) return null;
 
-      await deleteBooksWithHashInvalidation(tx, eq(books.id, input.duplicateBookId));
+      const absorbed = input.absorbDuplicate ? await input.absorbDuplicate(tx) : false;
+      if (!absorbed) await deleteBooksWithHashInvalidation(tx, eq(books.id, input.duplicateBookId));
       await tx
         .update(books)
         .set({

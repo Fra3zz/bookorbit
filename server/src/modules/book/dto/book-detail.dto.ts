@@ -6,6 +6,7 @@ import type {
   BookMetadataLockField,
   BookCommunityRating,
   CustomMetadataBookValue,
+  LinkedBookSummary,
   ComicMetadataFields,
   BookCoverSlot,
   CoverAspectRatio,
@@ -79,6 +80,8 @@ export class BookDetailDto {
   authors: { id: number; name: string; sortName: string | null }[];
   genres: string[];
   tags: string[];
+  genreRefs: { id: number; name: string }[];
+  tagRefs: { id: number; name: string }[];
   files: BookFileDto[];
   lastWrittenAt: Date | null;
   metadataScore: number | null;
@@ -91,4 +94,7 @@ export class BookDetailDto {
   lockedFields: BookMetadataLockField[];
   collections: { id: number; name: string }[];
   fileWriteStatus: BookFileWriteStatus;
+  linkedBooks: LinkedBookSummary[];
+  linkGroupId: number | null;
+  linkIsLead: boolean;
 }

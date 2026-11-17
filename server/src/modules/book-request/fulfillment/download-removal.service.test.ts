@@ -1,4 +1,7 @@
 import type { BookRequestDownloadRow } from '../../../db/schema';
+import { mkdir, mkdtemp, readdir } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { DownloadRemovalService } from './download-removal.service';
 
 const INFO_HASH = 'c9e15763f722f23e98a29decdfae341b98d53056';
@@ -11,11 +14,15 @@ function download(overrides: Partial<BookRequestDownloadRow> = {}): BookRequestD
     clientKey: INFO_HASH,
     source: 'torrent_file',
     status: 'downloading',
+    completedAt: null,
     ...overrides,
   } as BookRequestDownloadRow;
 }
 
-function makeService(options: { latest?: BookRequestDownloadRow | null; removeError?: Error } = {}) {
+async function makeService(
+  options: { latest?: BookRequestDownloadRow | null; removeError?: Error; stageCapable?: boolean; removesCompleted?: boolean } = {},
+) {
+  const appDataPath = await mkdtemp(join(tmpdir(), 'bookorbit-removal-'));
   const row = options.latest === undefined ? download() : options.latest;
   const downloads = {
     findLatestForRequests: vi.fn().mockResolvedValue(row ? new Map([[7, { download: row, downloadClientName: 'qbit' }]]) : new Map()),
@@ -27,22 +34,51 @@ function makeService(options: { latest?: BookRequestDownloadRow | null; removeEr
         Promise.resolve(expected.includes(row?.status ?? '') ? { ...row, id, ...patch } : undefined),
       ),
   };
-  const clients = { resolveConfig: vi.fn().mockResolvedValue({ id: 4, adapterType: 'qbittorrent' }) };
+  const clients = {
+    resolveConfig: vi.fn().mockResolvedValue({ id: 4, adapterType: options.stageCapable ? 'torbox' : 'qbittorrent' }),
+    stagesLocally: vi.fn().mockResolvedValue(options.stageCapable ?? false),
+    removesCompletedDownloads: vi.fn().mockResolvedValue(options.removesCompleted ?? false),
+  };
   const adapter = {
     remove: options.removeError ? vi.fn().mockRejectedValue(options.removeError) : vi.fn().mockResolvedValue(undefined),
   };
+  if (options.stageCapable) {
+    (adapter as Record<string, unknown>).stage = vi.fn();
+    (adapter as Record<string, unknown>).cancelStaging = vi.fn().mockResolvedValue(undefined);
+  }
   const registry = { require: vi.fn().mockReturnValue(adapter) };
   const direct = {
     remove: options.removeError ? vi.fn().mockRejectedValue(options.removeError) : vi.fn().mockResolvedValue(undefined),
   };
 
-  const service = new DownloadRemovalService(downloads as never, clients as never, registry as never, direct as never);
-  return { service, downloads, clients, adapter, registry, direct };
+  const service = new DownloadRemovalService(
+    downloads as never,
+    clients as never,
+    registry as never,
+    direct as never,
+    { getOrThrow: vi.fn(() => appDataPath) } as never,
+  );
+  return { service, downloads, clients, adapter, registry, direct, appDataPath };
 }
+
+describe('DownloadRemovalService.removeAttempt', () => {
+  /** A person stopped it, so the Jobs area reads it as cancelled; the English message stays for the request page. */
+  it('fails the attempt with the removed code beside the message', async () => {
+    const { service, downloads } = await makeService();
+
+    await expect(service.removeAttempt(7, 11, false, 'ann')).resolves.toBe(true);
+
+    expect(downloads.updateIf).toHaveBeenCalledWith(11, expect.arrayContaining(['downloading']), {
+      status: 'failed',
+      errorMessage: 'Removed from the download client by ann',
+      failureCode: 'removed',
+    });
+  });
+});
 
 describe('DownloadRemovalService.removeLatestForRequest', () => {
   it('hands the torrent to the client and fails the attempt behind it', async () => {
-    const { service, downloads, adapter } = makeService();
+    const { service, downloads, adapter } = await makeService();
 
     await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: true, error: null });
 
@@ -50,21 +86,83 @@ describe('DownloadRemovalService.removeLatestForRequest', () => {
     expect(downloads.updateIf).toHaveBeenCalledWith(11, expect.arrayContaining(['downloading']), {
       status: 'failed',
       errorMessage: expect.stringContaining('ann'),
+      failureCode: 'removed',
     });
   });
 
   it('leaves a finished attempt alone: the book is filed, the seed is not the request', async () => {
-    const { service, downloads } = makeService({ latest: download({ status: 'imported' }) });
+    const { service, downloads, adapter } = await makeService({ latest: download({ status: 'imported', completedAt: new Date() }) });
 
-    await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: true, error: null });
+    await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: false, error: null });
 
+    expect(adapter.remove).not.toHaveBeenCalled();
     // The conditional write is offered and refused, which is what leaves an imported row alone.
     expect(downloads.updateIf).toHaveBeenCalledWith(11, expect.not.arrayContaining(['imported']), expect.anything());
   });
 
+  /**
+   * Settling a request by hand used to pull the torrent and keep its files, which is a
+   * hit-and-run on a private tracker. The client holds the seed goals; it decides when seeding ends.
+   */
+  it.each(['completed', 'importing', 'needs_review', 'imported'] as const)(
+    'keeps a finished torrent seeding when the attempt is %s',
+    async (status) => {
+      const { service, adapter } = await makeService({ latest: download({ status, completedAt: new Date() }) });
+
+      await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: false, error: null });
+
+      expect(adapter.remove).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps a torrent whose bytes finished even after its import failed', async () => {
+    const { service, adapter } = await makeService({ latest: download({ status: 'failed', completedAt: new Date() }) });
+
+    await service.removeLatestForRequest(7, false, 'ann');
+
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
+  it('still settles a finished attempt that had not been imported yet, so nothing imports into a cancelled request', async () => {
+    const { service, downloads } = await makeService({ latest: download({ status: 'completed', completedAt: new Date() }) });
+
+    await service.removeLatestForRequest(7, false, 'ann');
+
+    expect(downloads.updateIf).toHaveBeenCalledWith(11, expect.arrayContaining(['completed']), {
+      status: 'failed',
+      errorMessage: expect.stringContaining('left seeding'),
+      failureCode: 'removed',
+    });
+  });
+
+  it('removes a finished torrent when the caller consented to deleting its files', async () => {
+    const { service, adapter } = await makeService({ latest: download({ status: 'imported', completedAt: new Date() }) });
+
+    await expect(service.removeLatestForRequest(7, true, 'ann')).resolves.toEqual({ removed: true, error: null });
+
+    expect(adapter.remove).toHaveBeenCalledWith(INFO_HASH, expect.anything(), { deleteFiles: true });
+  });
+
+  it('removes a finished usenet job: there is no seed to keep', async () => {
+    const { service, adapter } = await makeService({ latest: download({ source: 'nzb_file', status: 'imported', completedAt: new Date() }) });
+
+    await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: true, error: null });
+
+    expect(adapter.remove).toHaveBeenCalledWith(INFO_HASH, expect.anything(), { deleteFiles: false });
+  });
+
+  it('leaves a finished cloud download to the staging detach, which keeps the remote copy and clears local staging', async () => {
+    const { service, adapter } = await makeService({ latest: download({ status: 'imported', completedAt: new Date() }), stageCapable: true });
+
+    await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: true, error: null });
+
+    expect(adapter.cancelStaging).toHaveBeenCalledWith(INFO_HASH, expect.anything());
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
   it('deletes partial direct-download staging when a request is cancelled', async () => {
     const staged = download({ source: 'direct_url', downloadClientId: null });
-    const { service, direct, clients } = makeService({ latest: staged });
+    const { service, direct, clients } = await makeService({ latest: staged });
 
     await service.removeLatestForRequest(7, false, 'ann');
 
@@ -73,14 +171,14 @@ describe('DownloadRemovalService.removeLatestForRequest', () => {
   });
 
   it('reports nothing to remove for a request that was never grabbed', async () => {
-    const { service, adapter } = makeService({ latest: null });
+    const { service, adapter } = await makeService({ latest: null });
 
     await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: false, error: null });
     expect(adapter.remove).not.toHaveBeenCalled();
   });
 
   it('reports a torrent the download client no longer owns rather than resolving a config for null', async () => {
-    const { service, clients } = makeService({ latest: download({ source: 'torrent_file', downloadClientId: null }) });
+    const { service, clients } = await makeService({ latest: download({ source: 'torrent_file', downloadClientId: null }) });
 
     await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: false, error: null });
     expect(clients.resolveConfig).not.toHaveBeenCalled();
@@ -91,7 +189,7 @@ describe('DownloadRemovalService.removeLatestForRequest', () => {
    * keeps a stuck request stuck, so the refusal comes back as a value and the caller decides.
    */
   it('carries a client refusal back instead of throwing', async () => {
-    const { service } = makeService({ removeError: new Error('connection refused') });
+    const { service } = await makeService({ removeError: new Error('connection refused') });
 
     await expect(service.removeLatestForRequest(7, false, 'ann')).resolves.toEqual({ removed: false, error: 'connection refused' });
   });
@@ -102,13 +200,14 @@ describe('DownloadRemovalService.removeLatestForRequest', () => {
    * already been cancelled.
    */
   it('takes the attempt out of the in-flight set even when the client refused the detach', async () => {
-    const { service, downloads } = makeService({ removeError: new Error('connection refused') });
+    const { service, downloads } = await makeService({ removeError: new Error('connection refused') });
 
     await service.removeLatestForRequest(7, false, 'ann');
 
     expect(downloads.updateIf).toHaveBeenCalledWith(11, expect.arrayContaining(['downloading']), {
       status: 'failed',
       errorMessage: expect.stringContaining('connection refused'),
+      failureCode: 'removed',
     });
   });
 });
@@ -116,7 +215,7 @@ describe('DownloadRemovalService.removeLatestForRequest', () => {
 describe('DownloadRemovalService.cleanupStagedDirectDownload', () => {
   it('deletes direct-download staging once the Book Dock owns the file', async () => {
     const staged = download({ source: 'direct_url', status: 'importing', downloadClientId: null });
-    const { service, direct } = makeService({ latest: staged });
+    const { service, direct } = await makeService({ latest: staged });
 
     await service.cleanupStagedDirectDownload(staged);
 
@@ -125,7 +224,7 @@ describe('DownloadRemovalService.cleanupStagedDirectDownload', () => {
 
   it('does not remove torrent data during import', async () => {
     const torrent = download({ source: 'torrent_file', status: 'importing' });
-    const { service, adapter, direct } = makeService({ latest: torrent });
+    const { service, adapter, direct } = await makeService({ latest: torrent });
 
     await service.cleanupStagedDirectDownload(torrent);
 
@@ -135,8 +234,126 @@ describe('DownloadRemovalService.cleanupStagedDirectDownload', () => {
 
   it('does not fail an imported book when staging cleanup fails', async () => {
     const staged = download({ source: 'direct_url', status: 'importing', downloadClientId: null });
-    const { service } = makeService({ latest: staged, removeError: new Error('busy') });
+    const { service } = await makeService({ latest: staged, removeError: new Error('busy') });
 
     await expect(service.cleanupStagedDirectDownload(staged)).resolves.toBeUndefined();
+  });
+});
+
+describe('DownloadRemovalService.cleanupStagedClientDownload', () => {
+  it('deletes staged cloud client files from the app data directory', async () => {
+    const staged = download({ clientKey: INFO_HASH });
+    const { service, appDataPath } = await makeService({ latest: staged, stageCapable: true });
+    const stagedDir = join(appDataPath, 'client-downloads', 'torbox', '4', INFO_HASH);
+    await mkdir(stagedDir, { recursive: true });
+
+    await service.cleanupStagedClientDownload(staged);
+
+    await expect(readdir(stagedDir)).rejects.toThrow();
+  });
+
+  it('does nothing for direct downloads or adapters without staging', async () => {
+    const direct = download({ source: 'direct_url', downloadClientId: null });
+    const directContext = await makeService({ latest: direct });
+    await directContext.service.cleanupStagedClientDownload(direct);
+    expect(directContext.clients.resolveConfig).not.toHaveBeenCalled();
+
+    const torrent = download();
+    const torrentContext = await makeService({ latest: torrent });
+    await torrentContext.service.cleanupStagedClientDownload(torrent);
+    expect((torrentContext.adapter as Record<string, unknown>).stage).toBeUndefined();
+  });
+});
+
+describe('DownloadRemovalService.removeAttempt', () => {
+  it('removes a finished torrent an operator explicitly asked to remove', async () => {
+    const { service, adapter } = await makeService({ latest: download({ status: 'imported', completedAt: new Date() }) });
+
+    await expect(service.removeAttempt(7, 11, false, 'ann')).resolves.toBe(false);
+
+    expect(adapter.remove).toHaveBeenCalledWith(INFO_HASH, expect.anything(), { deleteFiles: false });
+  });
+});
+
+describe('DownloadRemovalService.removeCompletedDownload', () => {
+  const usenet = (overrides: Partial<BookRequestDownloadRow> = {}) => download({ source: 'nzb_file', status: 'importing', ...overrides });
+
+  it('removes an imported Usenet job and its files when the client is set to', async () => {
+    const { service, adapter, clients } = await makeService({ removesCompleted: true });
+
+    await service.removeCompletedDownload(usenet());
+
+    expect(clients.removesCompletedDownloads).toHaveBeenCalledWith(4);
+    expect(adapter.remove).toHaveBeenCalledWith(INFO_HASH, expect.objectContaining({ id: 4 }), { deleteFiles: true });
+  });
+
+  it('keeps the job when the client is not set to remove completed downloads', async () => {
+    const { service, adapter, clients } = await makeService({ removesCompleted: false });
+
+    await service.removeCompletedDownload(usenet());
+
+    expect(clients.resolveConfig).not.toHaveBeenCalled();
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a torrent, which may still be seeding', download({ source: 'torrent_file' })],
+    ['a magnet', download({ source: 'magnet' })],
+    ['a direct file, cleaned up as staging instead', download({ source: 'direct_url', downloadClientId: null })],
+    ['an attempt whose client was deleted', usenet({ downloadClientId: null })],
+    ['an attempt never handed to a client', usenet({ clientKey: null })],
+  ])('never touches %s', async (_case, row) => {
+    const { service, adapter, clients } = await makeService({ removesCompleted: true });
+
+    await service.removeCompletedDownload(row);
+
+    expect(clients.removesCompletedDownloads).not.toHaveBeenCalled();
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
+  it('does not fail an imported book when the client refuses', async () => {
+    const { service, adapter } = await makeService({ removesCompleted: true, removeError: new Error('Nothing was removed.') });
+
+    await expect(service.removeCompletedDownload(usenet())).resolves.toBeUndefined();
+    expect(adapter.remove).toHaveBeenCalled();
+  });
+});
+
+describe('DownloadRemovalService.detachAttempt', () => {
+  it('keeps a finished torrent seeding when its owner goes', async () => {
+    const finished = download({ status: 'completed', completedAt: new Date() });
+    const { service, adapter } = await makeService({ latest: finished });
+
+    await expect(service.detachAttempt(finished, false)).resolves.toBeNull();
+
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
+  it('stops a torrent that is still downloading when its owner goes', async () => {
+    const running = download();
+    const { service, adapter } = await makeService({ latest: running });
+
+    await expect(service.detachAttempt(running, false)).resolves.toBeNull();
+
+    expect(adapter.remove).toHaveBeenCalledWith(INFO_HASH, expect.anything(), { deleteFiles: false });
+  });
+
+  it('stops local staging and preserves the remote item without deletion consent', async () => {
+    const staged = download();
+    const { service, adapter } = await makeService({ latest: staged, stageCapable: true });
+
+    await expect(service.detachAttempt(staged, false)).resolves.toBeNull();
+
+    expect(adapter.remove).not.toHaveBeenCalled();
+    expect(adapter.cancelStaging).toHaveBeenCalledWith(INFO_HASH, expect.anything());
+  });
+
+  it('removes from a staging-capable client after explicit consent to delete its remote files', async () => {
+    const staged = download();
+    const { service, adapter } = await makeService({ latest: staged, stageCapable: true });
+
+    await expect(service.detachAttempt(staged, true)).resolves.toBeNull();
+
+    expect(adapter.remove).toHaveBeenCalledWith(INFO_HASH, expect.anything(), { deleteFiles: true });
   });
 });

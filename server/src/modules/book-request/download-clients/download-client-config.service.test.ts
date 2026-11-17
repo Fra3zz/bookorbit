@@ -16,6 +16,7 @@ function clientRow(overrides: Partial<DownloadClientRow> = {}): DownloadClientRo
     credentialsEnc: 'cipher',
     category: 'bookorbit',
     useHardlinks: true,
+    removeCompletedDownloads: false,
     allowPrivateAddress: false,
     settings: null,
     lastTestedAt: null,
@@ -27,7 +28,14 @@ function clientRow(overrides: Partial<DownloadClientRow> = {}): DownloadClientRo
   };
 }
 
-function makeService(overrides: { repo?: Record<string, unknown>; credentials?: Record<string, unknown>; downloads?: Record<string, unknown> } = {}) {
+function makeService(
+  overrides: {
+    repo?: Record<string, unknown>;
+    credentials?: Record<string, unknown>;
+    downloads?: Record<string, unknown>;
+    registry?: Record<string, unknown>;
+  } = {},
+) {
   const repo = {
     findAll: vi.fn().mockResolvedValue([{ client: clientRow(), pathMappings: [] }]),
     findById: vi.fn().mockResolvedValue({ client: clientRow(), pathMappings: [] }),
@@ -48,7 +56,7 @@ function makeService(overrides: { repo?: Record<string, unknown>; credentials?: 
     ...overrides.credentials,
   };
   const adapter = { test: vi.fn().mockResolvedValue({ success: true, version: 'v5.0.3' }), forget: vi.fn() };
-  const registry = { require: vi.fn().mockReturnValue(adapter), find: vi.fn().mockReturnValue(adapter) };
+  const registry = { require: vi.fn().mockReturnValue(adapter), find: vi.fn().mockReturnValue(adapter), ...overrides.registry };
   const pathMappings = { testHardlink: vi.fn().mockResolvedValue({ localPathExists: true, bookDockPathExists: true, hardlinkWorks: true }) };
   const config = { getOrThrow: vi.fn().mockReturnValue('/data/book-dock') };
   const downloads = { countInFlightForClient: vi.fn().mockResolvedValue(0), ...overrides.downloads };
@@ -211,6 +219,17 @@ describe('DownloadClientConfigService', () => {
     );
   });
 
+  it('requires an API key when creating TorBox', async () => {
+    const { service, repo } = makeService({
+      registry: { find: vi.fn().mockReturnValue({ label: 'TorBox', stage: vi.fn() }) },
+    });
+
+    await expect(service.create({ ...createDto, name: 'torbox', adapterType: 'torbox', pathMappings: [] })).rejects.toMatchObject({
+      response: { errorCode: 'DOWNLOAD_CLIENT_CREDENTIAL_REQUIRED', message: 'TorBox needs an API key' },
+    });
+    expect(repo.createWithPathMappings).not.toHaveBeenCalled();
+  });
+
   it('does not allow the required SABnzbd API key to be cleared', async () => {
     const { service, repo } = makeService({
       repo: { findById: vi.fn().mockResolvedValue({ client: clientRow({ adapterType: 'sabnzbd' }), pathMappings: [] }) },
@@ -298,6 +317,28 @@ describe('DownloadClientConfigService', () => {
     await expect(service.update(4, { pathMappings: [] })).rejects.toThrow(BadRequestException);
   });
 
+  it('allows TorBox to be created without path mappings and stores an empty mapping list', async () => {
+    const torbox = clientRow({ adapterType: 'torbox', name: 'torbox' });
+    const stored = { client: { ...torbox }, pathMappings: [] };
+    const { service, repo } = makeService({
+      repo: { createWithPathMappings: vi.fn().mockResolvedValue(torbox), findById: vi.fn().mockResolvedValue(stored) },
+      registry: { find: vi.fn().mockReturnValue({ stage: vi.fn(), label: 'TorBox' }) },
+    });
+
+    await service.create({ ...createDto, name: 'torbox', adapterType: 'torbox', password: 'api-key', pathMappings: [] });
+
+    expect(repo.createWithPathMappings).toHaveBeenCalledWith(expect.objectContaining({ adapterType: 'torbox' }), []);
+  });
+
+  it('still requires path mappings for non-staging clients', async () => {
+    const { service, repo } = makeService();
+
+    await expect(service.create({ ...createDto, pathMappings: [] })).rejects.toMatchObject({
+      response: { errorCode: 'DOWNLOAD_CLIENT_MAPPING_REQUIRED' },
+    });
+    expect(repo.createWithPathMappings).not.toHaveBeenCalled();
+  });
+
   /** The single-host install: same filesystem is an identity mapping, not an absent one. */
   it('accepts an identity mapping', async () => {
     const { service, repo } = makeService();
@@ -309,6 +350,86 @@ describe('DownloadClientConfigService', () => {
     const { service, repo } = makeService();
     await expect(service.test(4)).resolves.toEqual({ success: true, version: 'v5.0.3' });
     expect(repo.recordTestResult).toHaveBeenCalledWith(4, true, null);
+  });
+
+  it('reports whether the configured adapter stages locally', async () => {
+    const torboxRow = { client: clientRow({ adapterType: 'torbox' }), pathMappings: [] };
+    const adapter = { stage: vi.fn(), test: vi.fn() };
+    const { service } = makeService({
+      repo: { findById: vi.fn().mockResolvedValueOnce(torboxRow).mockResolvedValueOnce({ client: clientRow(), pathMappings: [] }) },
+      registry: { find: vi.fn().mockImplementation((type) => (type === 'torbox' ? adapter : undefined)) },
+    });
+
+    await expect(service.stagesLocally(4)).resolves.toBe(true);
+    await expect(service.stagesLocally(4)).resolves.toBe(false);
+  });
+
+  it('validates a transient config with the adapter and does not persist it', async () => {
+    const result = { success: false, error: 'invalid key' };
+    const { service, adapter, repo, registry } = makeService();
+    adapter.test.mockResolvedValue(result);
+    registry.require.mockReturnValue({ label: 'TorBox', test: adapter.test, forget: adapter.forget });
+
+    await expect(
+      service.validate({ adapterType: 'torbox', baseUrl: '  https://api.torbox.app  ', username: '  user  ', password: 'key' }),
+    ).resolves.toBe(result);
+    expect(adapter.test).toHaveBeenCalledWith({
+      id: expect.any(Number),
+      name: 'TorBox',
+      adapterType: 'torbox',
+      baseUrl: 'https://api.torbox.app',
+      username: 'user',
+      password: 'key',
+      category: 'bookorbit',
+      allowPrivateAddress: false,
+      settings: null,
+    });
+    // A negative id can never collide with a saved client, so a validation session cannot be
+    // picked up by a later one, and the id is dropped once the call returns.
+    const { id } = adapter.test.mock.calls[0]![0] as { id: number };
+    expect(id).toBeLessThan(0);
+    expect(adapter.forget).toHaveBeenCalledWith(id);
+    expect(repo.create).not.toHaveBeenCalled();
+    expect(repo.createWithPathMappings).not.toHaveBeenCalled();
+    expect(repo.update).not.toHaveBeenCalled();
+  });
+
+  it('uses the transient private-address choice when validating a client', async () => {
+    const { service, adapter } = makeService();
+
+    await service.validate({
+      adapterType: 'torbox',
+      baseUrl: 'https://torbox-proxy.internal',
+      password: 'key',
+      allowPrivateAddress: true,
+    });
+
+    expect(adapter.test).toHaveBeenCalledWith(expect.objectContaining({ allowPrivateAddress: true }));
+  });
+
+  it('gives each validation its own session slot and disposes it', async () => {
+    const { service, adapter, registry } = makeService();
+    registry.require.mockReturnValue({ label: 'qBittorrent', test: adapter.test, forget: adapter.forget });
+
+    await service.validate({ adapterType: 'qbittorrent', baseUrl: 'http://192.0.2.5:8080', password: 'right' });
+    await service.validate({ adapterType: 'qbittorrent', baseUrl: 'http://192.0.2.5:8080', password: 'wrong' });
+
+    const first = adapter.test.mock.calls[0]![0] as { id: number };
+    const second = adapter.test.mock.calls[1]![0] as { id: number };
+    // Distinct slots, so the second call cannot reuse the first's cached session.
+    expect(first.id).not.toBe(second.id);
+    expect(adapter.forget).toHaveBeenNthCalledWith(1, first.id);
+    expect(adapter.forget).toHaveBeenNthCalledWith(2, second.id);
+  });
+
+  it('disposes the validation session even when the adapter test throws', async () => {
+    const { service, adapter, registry } = makeService();
+    adapter.test.mockRejectedValue(new Error('boom'));
+    registry.require.mockReturnValue({ label: 'qBittorrent', test: adapter.test, forget: adapter.forget });
+
+    await expect(service.validate({ adapterType: 'qbittorrent', baseUrl: 'http://192.0.2.5:8080', password: 'x' })).rejects.toThrow('boom');
+    const { id } = adapter.test.mock.calls[0]![0] as { id: number };
+    expect(adapter.forget).toHaveBeenCalledWith(id);
   });
 
   it('records why a connection test failed, and reports it as a failure rather than a 200', async () => {
@@ -325,6 +446,76 @@ describe('DownloadClientConfigService', () => {
 
     await expect(service.test(4)).resolves.toEqual({ success: true });
     expect(repo.recordTestResult).toHaveBeenCalledWith(4, true, null);
+  });
+
+  describe('removing completed downloads', () => {
+    const sabDto = { ...createDto, name: 'sab', adapterType: 'sabnzbd' as const, password: 'api-key' };
+
+    it('is off unless the save asks for it, which keeps every download in the client', async () => {
+      const { service, repo } = makeService();
+
+      await service.create(sabDto);
+
+      expect(repo.createWithPathMappings).toHaveBeenCalledWith(expect.objectContaining({ removeCompletedDownloads: false }), expect.anything());
+    });
+
+    it.each(['sabnzbd', 'nzbget'] as const)('can be turned on for %s', async (adapterType) => {
+      const { service, repo } = makeService();
+
+      await service.create({ ...sabDto, adapterType, removeCompletedDownloads: true });
+
+      expect(repo.createWithPathMappings).toHaveBeenCalledWith(expect.objectContaining({ removeCompletedDownloads: true }), expect.anything());
+    });
+
+    it.each(['qbittorrent', 'transmission', 'deluge', 'rtorrent', 'torbox'] as const)('is refused for %s, which seeds', async (adapterType) => {
+      const { service, repo } = makeService({ registry: { find: vi.fn().mockReturnValue({ label: adapterType }) } });
+
+      await expect(
+        service.create({ ...createDto, adapterType, password: 'secret', pathMappings: createDto.pathMappings, removeCompletedDownloads: true }),
+      ).rejects.toMatchObject({ response: { errorCode: 'DOWNLOAD_CLIENT_REMOVE_COMPLETED_UNSUPPORTED', statusCode: HttpStatus.BAD_REQUEST } });
+      expect(repo.createWithPathMappings).not.toHaveBeenCalled();
+    });
+
+    it('accepts an explicit false for a torrent client, so a form sending every field is never refused', async () => {
+      const { service, repo } = makeService();
+
+      await service.create({ ...createDto, removeCompletedDownloads: false });
+
+      expect(repo.createWithPathMappings).toHaveBeenCalled();
+    });
+
+    it('is refused on an edit of a torrent client and leaves the row alone', async () => {
+      const { service, repo } = makeService();
+
+      await expect(service.update(4, { removeCompletedDownloads: true })).rejects.toMatchObject({
+        response: { errorCode: 'DOWNLOAD_CLIENT_REMOVE_COMPLETED_UNSUPPORTED' },
+      });
+      expect(repo.update).not.toHaveBeenCalled();
+    });
+
+    it('is saved on an edit of a Usenet client and returned with it', async () => {
+      const sab = clientRow({ adapterType: 'sabnzbd', removeCompletedDownloads: true });
+      const { service, repo } = makeService({ repo: { findById: vi.fn().mockResolvedValue({ client: sab, pathMappings: [] }) } });
+
+      const item = await service.update(4, { removeCompletedDownloads: true });
+
+      expect(repo.update).toHaveBeenCalledWith(4, { removeCompletedDownloads: true });
+      expect(item.removeCompletedDownloads).toBe(true);
+    });
+
+    it('is only honoured for a type that allows it, whatever the row says', async () => {
+      const torrent = makeService({
+        repo: { findById: vi.fn().mockResolvedValue({ client: clientRow({ removeCompletedDownloads: true }), pathMappings: [] }) },
+      });
+      const usenet = makeService({
+        repo: {
+          findById: vi.fn().mockResolvedValue({ client: clientRow({ adapterType: 'nzbget', removeCompletedDownloads: true }), pathMappings: [] }),
+        },
+      });
+
+      await expect(torrent.service.removesCompletedDownloads(4)).resolves.toBe(false);
+      await expect(usenet.service.removesCompletedDownloads(4)).resolves.toBe(true);
+    });
   });
 
   it('decrypts credentials only into a value object, never onto the row', async () => {

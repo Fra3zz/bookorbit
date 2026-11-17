@@ -49,6 +49,9 @@ function makeKoreaderUserRow(overrides?: Record<string, unknown>) {
   };
 }
 
+let accessibleLibraryIds: ReturnType<typeof vi.fn>;
+const libraryScopeStub = () => ({ visibleIdsOrAll: accessibleLibraryIds, visibleIdsOrAllForUserId: accessibleLibraryIds });
+
 describe('KoreaderService', () => {
   let service: KoreaderService;
   let mockRepo: {
@@ -58,7 +61,6 @@ describe('KoreaderService', () => {
     createKoreaderUser: ReturnType<typeof vi.fn>;
     updateKoreaderUser: ReturnType<typeof vi.fn>;
     deleteKoreaderUser: ReturnType<typeof vi.fn>;
-    getAccessibleLibraryIds: ReturnType<typeof vi.fn>;
     resolveBookFileByHash: ReturnType<typeof vi.fn>;
     upsertDeviceProgress: ReturnType<typeof vi.fn>;
     upsertDeviceProgressMany: ReturnType<typeof vi.fn>;
@@ -88,6 +90,9 @@ describe('KoreaderService', () => {
     getChapters: ReturnType<typeof vi.fn>;
     getLastFileWriteTime: ReturnType<typeof vi.fn>;
     removeDevice: ReturnType<typeof vi.fn>;
+    getDeviceNames: ReturnType<typeof vi.fn>;
+    setDeviceName: ReturnType<typeof vi.fn>;
+    clearDeviceName: ReturnType<typeof vi.fn>;
   };
   let mockChapterService: {
     parseChapterIndexFromProgress: ReturnType<typeof vi.fn>;
@@ -117,6 +122,7 @@ describe('KoreaderService', () => {
     getVersionInfo: ReturnType<typeof vi.fn>;
   };
   beforeEach(() => {
+    accessibleLibraryIds = vi.fn();
     vi.restoreAllMocks();
     vi.clearAllMocks();
 
@@ -141,7 +147,6 @@ describe('KoreaderService', () => {
       createKoreaderUser: vi.fn(),
       updateKoreaderUser: vi.fn(),
       deleteKoreaderUser: vi.fn(),
-      getAccessibleLibraryIds: vi.fn(),
       resolveBookFileByHash: vi.fn(),
       upsertDeviceProgress: vi.fn(),
       upsertDeviceProgressMany: vi.fn(),
@@ -175,6 +180,9 @@ describe('KoreaderService', () => {
       deviceExists: vi.fn().mockResolvedValue(true),
       retireDevice: vi.fn().mockResolvedValue(undefined),
       restoreDevice: vi.fn().mockResolvedValue(undefined),
+      getDeviceNames: vi.fn().mockResolvedValue(new Map()),
+      setDeviceName: vi.fn().mockResolvedValue(undefined),
+      clearDeviceName: vi.fn().mockResolvedValue(undefined),
     };
 
     mockChapterService = {
@@ -223,7 +231,7 @@ describe('KoreaderService', () => {
     mockRepo.upsertDeviceProgress.mockResolvedValue(undefined);
     mockRepo.upsertDeviceProgressMany.mockResolvedValue(undefined);
     mockRepo.upsertReadingProgress.mockResolvedValue(undefined);
-    mockRepo.getAccessibleLibraryIds.mockResolvedValue([1, 2]);
+    accessibleLibraryIds.mockResolvedValue([1, 2]);
     mockChapterService.parseChapterIndexFromProgress.mockReturnValue(null);
     mockChapterExtractor.extractAndStoreChapters.mockResolvedValue([]);
 
@@ -240,6 +248,7 @@ describe('KoreaderService', () => {
       mockPositionConverter as never,
       mockBookService as never,
       mockPackageService as unknown as KoreaderPackageService,
+      libraryScopeStub() as never,
     );
   });
 
@@ -606,7 +615,7 @@ describe('KoreaderService', () => {
     });
 
     it('passes empty accessible library lists to hash resolution', async () => {
-      mockRepo.getAccessibleLibraryIds.mockResolvedValue([]);
+      accessibleLibraryIds.mockResolvedValue([]);
       mockRepo.resolveBookFileByHash.mockResolvedValue(null);
 
       await expect(
@@ -1115,7 +1124,7 @@ describe('KoreaderService', () => {
       mockRepo.getChapters.mockResolvedValue([]);
       mockRepo.getLastFileWriteTime.mockResolvedValue(null);
 
-      const info = await service.getBookProgress(7, 20);
+      const info = await service.getBookProgress({ id: 7, isSuperuser: false }, 20);
 
       expect(info?.canonicalSource).toBe('web_reader');
       expect(info?.canonicalPercentage).toBe(0);
@@ -1136,7 +1145,7 @@ describe('KoreaderService', () => {
       mockRepo.getChapters.mockResolvedValue([]);
       mockRepo.getLastFileWriteTime.mockResolvedValue(null);
 
-      const info = await service.getBookProgress(7, 20);
+      const info = await service.getBookProgress({ id: 7, isSuperuser: false }, 20);
 
       expect(info?.canonicalSource).toBe('koreader');
       expect(info?.heldByReset).toEqual([]);
@@ -1147,7 +1156,7 @@ describe('KoreaderService', () => {
       mockRepo.getDeviceProgressForDevice.mockResolvedValue({ percentage: 0.42, progress: '/body/DocFragment[6]/body', syncTimestamp: null });
       mockRepo.getProgressReset.mockResolvedValue(resetAt);
 
-      await service.releaseResetHold(7, 20, 'device-1');
+      await service.releaseResetHold({ id: 7, isSuperuser: false }, 20, 'device-1');
 
       // Recording convergence instead would leave the marker live, and the next pull would ask
       // this same device to go back to the start.
@@ -1159,7 +1168,7 @@ describe('KoreaderService', () => {
       mockRepo.findProgressBookFileByBookId.mockResolvedValue({ id: 10, bookId: 20, libraryId: 1, format: 'epub' });
       mockRepo.getDeviceProgressForDevice.mockResolvedValue(null);
 
-      await expect(service.releaseResetHold(7, 20, 'device-1')).rejects.toThrow(NotFoundException);
+      await expect(service.releaseResetHold({ id: 7, isSuperuser: false }, 20, 'device-1')).rejects.toThrow(NotFoundException);
     });
 
     it('answers a release with no pending reset as not found rather than a database error', async () => {
@@ -1167,17 +1176,17 @@ describe('KoreaderService', () => {
       mockRepo.getDeviceProgressForDevice.mockResolvedValue({ percentage: 0.42, progress: '/body/DocFragment[6]/body', syncTimestamp: null });
       mockRepo.getProgressReset.mockResolvedValue(null);
 
-      await expect(service.releaseResetHold(7, 20, 'device-1')).rejects.toThrow(NotFoundException);
+      await expect(service.releaseResetHold({ id: 7, isSuperuser: false }, 20, 'device-1')).rejects.toThrow(NotFoundException);
       expect(mockRepo.upsertReadingProgress).not.toHaveBeenCalled();
     });
 
     it('resolves the release target only within libraries the user can still reach', async () => {
-      mockRepo.getAccessibleLibraryIds.mockResolvedValue([3]);
+      accessibleLibraryIds.mockResolvedValue([3]);
       mockRepo.findProgressBookFileByBookId.mockResolvedValue(null);
 
       // A device progress row outlives the library grant that created it, so holding a row is
       // not proof of access to the book it points at.
-      await expect(service.releaseResetHold(7, 20, 'device-1')).rejects.toThrow(NotFoundException);
+      await expect(service.releaseResetHold({ id: 7, isSuperuser: false }, 20, 'device-1')).rejects.toThrow(NotFoundException);
       expect(mockRepo.findProgressBookFileByBookId).toHaveBeenCalledWith(20, 7, [3]);
     });
   });
@@ -1207,6 +1216,32 @@ describe('KoreaderService', () => {
         device_id: 'device-1',
         timestamp: Math.floor(latestDeviceTime.getTime() / 1000),
       });
+    });
+
+    it('adds the name the user gave the device without changing the reported model', async () => {
+      const latestDeviceTime = new Date('2026-02-01T10:00:00.000Z');
+      mockRepo.resolveBookFileByHash.mockResolvedValue({ id: 10, bookId: 20, libraryId: 1 });
+      mockRepo.getLatestDeviceProgress.mockResolvedValue({
+        percentage: 0.66,
+        progress: '/body/DocFragment[8]/body',
+        device: 'blazer',
+        deviceId: 'device-1',
+        syncTimestamp: null,
+        updatedAt: latestDeviceTime,
+      });
+      mockRepo.getReadingProgress.mockResolvedValue(null);
+      mockRepo.getDeviceNames.mockResolvedValue(new Map([['device-1', 'Pixel 8']]));
+
+      await expect(service.getProgress(7, 'doc-hash')).resolves.toEqual({
+        document: 'doc-hash',
+        percentage: 0.66,
+        progress: '/body/DocFragment[8]/body',
+        device: 'blazer',
+        device_id: 'device-1',
+        device_name: 'Pixel 8',
+        timestamp: Math.floor(latestDeviceTime.getTime() / 1000),
+      });
+      expect(mockRepo.getDeviceNames).toHaveBeenCalledWith(7, ['device-1']);
     });
 
     it('returns web reader progress with null XPointer when no CFI is stored', async () => {
@@ -1415,6 +1450,7 @@ describe('KoreaderService', () => {
       const devices = [
         {
           device: 'Kobo Libra',
+          deviceName: null,
           deviceId: 'device-1',
           lastSyncAt: '2026-02-01T10:00:00.000Z',
           lastBookTitle: null,
@@ -1620,6 +1656,44 @@ describe('KoreaderService', () => {
         }),
       );
     });
+
+    it('gives each device and sweep the name the user chose, keeping the reported model', async () => {
+      vi.spyOn(service, 'getCredentials').mockResolvedValue(null);
+      mockRepo.getTotalSyncedBooks.mockResolvedValue(0);
+      mockRepo.getDevicesList.mockResolvedValue([
+        { device: 'blazer', deviceId: 'phone', lastSyncAt: new Date('2026-02-01T10:00:00.000Z'), lastBookTitle: null, retiredAt: null },
+      ]);
+      mockPluginRepo.listSweeps.mockResolvedValue([
+        {
+          deviceId: 'phone',
+          deviceModel: 'blazer',
+          pluginVersion: '2.3.0',
+          lastSweepAt: new Date('2026-02-01T10:00:00.000Z'),
+          lastSweepBooksMatched: 0,
+          lastSweepPageStats: 0,
+          lastSweepAnnotations: 0,
+        },
+        {
+          deviceId: 'kobo',
+          deviceModel: 'Kobo_monza',
+          pluginVersion: '2.3.0',
+          lastSweepAt: new Date('2026-02-01T09:00:00.000Z'),
+          lastSweepBooksMatched: 0,
+          lastSweepPageStats: 0,
+          lastSweepAnnotations: 0,
+        },
+      ]);
+      mockRepo.getDeviceNames.mockResolvedValue(new Map([['phone', 'Pixel 8']]));
+
+      const result = await service.getSyncStatus(7);
+
+      expect(mockRepo.getDeviceNames).toHaveBeenCalledWith(7);
+      expect(result.devices[0]).toEqual(expect.objectContaining({ device: 'blazer', deviceName: 'Pixel 8' }));
+      expect(result.sweeps).toEqual([
+        expect.objectContaining({ deviceId: 'phone', deviceModel: 'blazer', deviceName: 'Pixel 8' }),
+        expect.objectContaining({ deviceId: 'kobo', deviceModel: 'Kobo_monza', deviceName: null }),
+      ]);
+    });
   });
 
   describe('KOReader user default file pattern', () => {
@@ -1720,10 +1794,12 @@ describe('KoreaderService', () => {
           standaloneFileNamingPattern: null,
         },
       ]);
+      mockRepo.getDeviceNames.mockResolvedValue(new Map([['device-2', 'Pixel 8']]));
 
       await expect(service.getDevices(7)).resolves.toEqual([
         {
           device: 'Kobo Libra',
+          deviceName: null,
           deviceId: 'device-1',
           lastSyncAt: '2026-02-01T10:00:00.000Z',
           lastBookTitle: 'Project Hail Mary',
@@ -1734,6 +1810,7 @@ describe('KoreaderService', () => {
         },
         {
           device: 'KOReader',
+          deviceName: 'Pixel 8',
           deviceId: 'device-2',
           lastSyncAt: '2026-02-01T11:00:00.000Z',
           lastBookTitle: null,
@@ -1882,6 +1959,32 @@ describe('KoreaderService', () => {
     });
   });
 
+  describe('setDeviceName', () => {
+    it('names a known device', async () => {
+      await service.setDeviceName(7, 'device-1', 'Pixel 8');
+
+      expect(mockRepo.deviceExists).toHaveBeenCalledWith(7, 'device-1');
+      expect(mockRepo.setDeviceName).toHaveBeenCalledWith(7, 'device-1', 'Pixel 8');
+      expect(mockRepo.clearDeviceName).not.toHaveBeenCalled();
+    });
+
+    it('clears the name when given null', async () => {
+      await service.setDeviceName(7, 'device-1', null);
+
+      expect(mockRepo.clearDeviceName).toHaveBeenCalledWith(7, 'device-1');
+      expect(mockRepo.setDeviceName).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException for a device the user does not have', async () => {
+      mockRepo.deviceExists.mockResolvedValue(false);
+
+      await expect(service.setDeviceName(7, 'someone-elses-device', 'Pixel 8')).rejects.toThrow(NotFoundException);
+      await expect(service.setDeviceName(7, 'someone-elses-device', null)).rejects.toThrow(NotFoundException);
+      expect(mockRepo.setDeviceName).not.toHaveBeenCalled();
+      expect(mockRepo.clearDeviceName).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getBookProgress', () => {
     it('returns full sync info with chapters when KOReader is the canonical source', async () => {
       const latestDeviceTime = new Date('2026-03-01T10:00:00.000Z');
@@ -1913,8 +2016,9 @@ describe('KoreaderService', () => {
         { chapterIndex: 2, title: 'Chapter 3' },
       ]);
       mockRepo.getLastFileWriteTime.mockResolvedValue(new Date('2026-03-01T12:00:00.000Z'));
+      mockRepo.getDeviceNames.mockResolvedValue(new Map([['device-1', 'Living room Kobo']]));
 
-      await expect(service.getBookProgress(7, 99)).resolves.toEqual({
+      await expect(service.getBookProgress({ id: 7, isSuperuser: false }, 99)).resolves.toEqual({
         bookId: 99,
         bookFileId: 31,
         canonicalPercentage: 75,
@@ -1925,6 +2029,7 @@ describe('KoreaderService', () => {
         devices: [
           {
             device: 'Kobo Libra',
+            deviceName: 'Living room Kobo',
             deviceId: 'device-1',
             percentage: 75,
             chapterIndex: 2,
@@ -1933,6 +2038,7 @@ describe('KoreaderService', () => {
           },
           {
             device: 'Kobo Sage',
+            deviceName: null,
             deviceId: 'device-2',
             percentage: 25,
             chapterIndex: 1,
@@ -1943,16 +2049,17 @@ describe('KoreaderService', () => {
         fileModifiedSinceLastSync: true,
         heldByReset: [],
       });
+      expect(mockRepo.getDeviceNames).toHaveBeenCalledWith(7, ['device-1', 'device-2']);
     });
 
     it('returns null when the book has no file to report on', async () => {
       mockRepo.findProgressBookFileByBookId.mockResolvedValue(null);
 
-      await expect(service.getBookProgress(7, 99)).resolves.toBeNull();
+      await expect(service.getBookProgress({ id: 7, isSuperuser: false }, 99)).resolves.toBeNull();
     });
 
     it('reports the file the user devices sync, resolved within libraries the user can reach', async () => {
-      mockRepo.getAccessibleLibraryIds.mockResolvedValue([3]);
+      accessibleLibraryIds.mockResolvedValue([3]);
       mockRepo.findProgressBookFileByBookId.mockResolvedValue({ id: 44, bookId: 99, libraryId: 3, format: 'epub' });
       mockRepo.getBookProgressForDashboard.mockResolvedValue({
         deviceProgress: [
@@ -1963,7 +2070,7 @@ describe('KoreaderService', () => {
       mockRepo.getChapters.mockResolvedValue([]);
       mockRepo.getLastFileWriteTime.mockResolvedValue(null);
 
-      const info = await service.getBookProgress(7, 99);
+      const info = await service.getBookProgress({ id: 7, isSuperuser: false }, 99);
 
       // The same resolver the release action uses, so a hold shown here is one it can release.
       expect(mockRepo.findProgressBookFileByBookId).toHaveBeenCalledWith(99, 7, [3]);
@@ -1978,7 +2085,7 @@ describe('KoreaderService', () => {
         readingProgress: null,
       });
 
-      await expect(service.getBookProgress(7, 99)).resolves.toBeNull();
+      await expect(service.getBookProgress({ id: 7, isSuperuser: false }, 99)).resolves.toBeNull();
     });
 
     it('uses web reader as the canonical source when its progress is newer', async () => {
@@ -2001,7 +2108,7 @@ describe('KoreaderService', () => {
       mockRepo.getChapters.mockResolvedValue([{ chapterIndex: 1, title: 'Chapter 2' }]);
       mockRepo.getLastFileWriteTime.mockResolvedValue(new Date('2026-03-01T07:00:00.000Z'));
 
-      await expect(service.getBookProgress(7, 99)).resolves.toEqual({
+      await expect(service.getBookProgress({ id: 7, isSuperuser: false }, 99)).resolves.toEqual({
         bookId: 99,
         bookFileId: 31,
         canonicalPercentage: 64.3,
@@ -2012,6 +2119,7 @@ describe('KoreaderService', () => {
         devices: [
           {
             device: 'Kobo Libra',
+            deviceName: null,
             deviceId: 'device-1',
             percentage: 20,
             chapterIndex: 1,
@@ -2054,7 +2162,7 @@ describe('KoreaderService', () => {
       ]);
       mockRepo.getLastFileWriteTime.mockResolvedValue(new Date('2026-03-01T12:00:00.000Z'));
 
-      const result = await service.getBookProgress(7, 99);
+      const result = await service.getBookProgress({ id: 7, isSuperuser: false }, 99);
 
       expect(result?.canonicalSource).toBe('koreader');
       expect(result?.fileModifiedSinceLastSync).toBe(true);
@@ -2090,7 +2198,7 @@ describe('KoreaderService', () => {
       ]);
       mockRepo.getLastFileWriteTime.mockResolvedValue(new Date('2026-03-01T12:00:00.000Z'));
 
-      const result = await service.getBookProgress(7, 99);
+      const result = await service.getBookProgress({ id: 7, isSuperuser: false }, 99);
 
       expect(result?.canonicalSource).toBe('koreader');
       expect(result?.fileModifiedSinceLastSync).toBe(false);

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { applyDisplayPreferences, getDisplayPreferencesSnapshot, sanitizeDisplayPreferences, useDisplaySettings } from '../useDisplaySettings'
 
 const settings = useDisplaySettings()
@@ -29,7 +29,9 @@ function resetDisplaySettings() {
   settings.gridCardPrimaryLabel.value = 'hidden'
   settings.gridCardSecondaryLabel.value = 'hidden'
   settings.cardInfoMode.value = 'hover-overlay'
-  settings.thumbnailClickAction.value = 'reader'
+  settings.thumbnailClickAction.value = 'details'
+  settings.openHighlightsInPeek.value = false
+  settings.formatBadgeStyle.value = 'underline'
 }
 
 afterEach(() => {
@@ -51,7 +53,7 @@ describe('useDisplaySettings preferences helpers', () => {
       showJumpRails: true,
       bookSpineOverlay: 'strong',
       bookCoverDisplayMode: 'natural-bottom',
-      thumbnailClickAction: 'reader',
+      thumbnailClickAction: 'details',
     })
   })
 
@@ -230,9 +232,9 @@ describe('useDisplaySettings preferences helpers', () => {
     expect(snap.thumbnailClickAction).toBe('details')
   })
 
-  it('defaults thumbnailClickAction to reader', () => {
+  it('defaults thumbnailClickAction to details', () => {
     resetDisplaySettings()
-    expect(settings.thumbnailClickAction.value).toBe('reader')
+    expect(settings.thumbnailClickAction.value).toBe('details')
   })
 
   it('sanitizes valid thumbnailClickAction values', () => {
@@ -248,5 +250,50 @@ describe('useDisplaySettings preferences helpers', () => {
   it('applies thumbnailClickAction from preferences', () => {
     applyDisplayPreferences({ thumbnailClickAction: 'details' })
     expect(settings.thumbnailClickAction.value).toBe('details')
+  })
+
+  it('defaults openHighlightsInPeek to off and includes it in the snapshot', () => {
+    expect(settings.openHighlightsInPeek.value).toBe(false)
+    expect(getDisplayPreferencesSnapshot().openHighlightsInPeek).toBe(false)
+
+    settings.openHighlightsInPeek.value = true
+    expect(getDisplayPreferencesSnapshot().openHighlightsInPeek).toBe(true)
+  })
+
+  it('sanitizes openHighlightsInPeek to booleans only', () => {
+    expect(sanitizeDisplayPreferences({ openHighlightsInPeek: true })).toEqual({ openHighlightsInPeek: true })
+    expect(sanitizeDisplayPreferences({ openHighlightsInPeek: false })).toEqual({ openHighlightsInPeek: false })
+    expect(sanitizeDisplayPreferences({ openHighlightsInPeek: 'yes' })).toEqual({})
+  })
+
+  it('applies openHighlightsInPeek from preferences', () => {
+    applyDisplayPreferences({ openHighlightsInPeek: true })
+    expect(settings.openHighlightsInPeek.value).toBe(true)
+  })
+
+  it('sanitizes valid formatBadgeStyle values and drops the rest', () => {
+    expect(sanitizeDisplayPreferences({ formatBadgeStyle: 'primary' })).toEqual({ formatBadgeStyle: 'primary' })
+    expect(sanitizeDisplayPreferences({ formatBadgeStyle: 'pips' })).toEqual({ formatBadgeStyle: 'pips' })
+    expect(sanitizeDisplayPreferences({ formatBadgeStyle: 'spine' })).toEqual({})
+    expect(sanitizeDisplayPreferences({ formatBadgeStyle: 3 })).toEqual({})
+  })
+
+  it('applies formatBadgeStyle from preferences and includes it in the snapshot', () => {
+    applyDisplayPreferences({ formatBadgeStyle: 'bubble' })
+    expect(settings.formatBadgeStyle.value).toBe('bubble')
+    expect(getDisplayPreferencesSnapshot().formatBadgeStyle).toBe('bubble')
+  })
+
+  it('defaults formatBadgeStyle to underline, also when a stored value is not a style any more', async () => {
+    vi.resetModules()
+    localStorage.clear()
+    const fresh = await import('../useDisplaySettings')
+    expect(fresh.useDisplaySettings().formatBadgeStyle.value).toBe('underline')
+
+    vi.resetModules()
+    localStorage.setItem('formatBadgeStyle', JSON.stringify('spine'))
+    const stale = await import('../useDisplaySettings')
+    expect(stale.useDisplaySettings().formatBadgeStyle.value).toBe('underline')
+    localStorage.clear()
   })
 })

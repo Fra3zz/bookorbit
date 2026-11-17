@@ -5,11 +5,13 @@
     "methodName": "listDismissals",
     "httpMethod": "GET",
     "path": "/book-duplicates/dismissals",
-    "permissions": ["Permission.LibraryDeleteBooks"],
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-duplicates/book-duplicates.controller.ts",
@@ -17,11 +19,13 @@
     "methodName": "dismissGroup",
     "httpMethod": "POST",
     "path": "/book-duplicates/dismissals",
-    "permissions": ["Permission.LibraryDeleteBooks"],
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-duplicates/book-duplicates.controller.ts",
@@ -29,11 +33,97 @@
     "methodName": "restoreDismissal",
     "httpMethod": "DELETE",
     "path": "/book-duplicates/dismissals/:bookIdA/:bookIdB",
-    "permissions": ["Permission.LibraryDeleteBooks"],
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-duplicates/book-duplicates.controller.ts",
+    "className": "BookDuplicatesController",
+    "methodName": "createScan",
+    "httpMethod": "POST",
+    "path": "/book-duplicates/scans",
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-duplicates/book-duplicates.controller.ts",
+    "className": "BookDuplicatesController",
+    "methodName": "getActiveScan",
+    "httpMethod": "GET",
+    "path": "/book-duplicates/scans/active",
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/book-duplicates/book-duplicates.controller.ts",
+    "className": "BookDuplicatesController",
+    "methodName": "getScan",
+    "httpMethod": "GET",
+    "path": "/book-duplicates/scans/:scanId",
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/book-duplicates/book-duplicates.controller.ts",
+    "className": "BookDuplicatesController",
+    "methodName": "getGroups",
+    "httpMethod": "GET",
+    "path": "/book-duplicates/scans/:scanId/groups",
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/book-duplicates/book-duplicates.controller.ts",
+    "className": "BookDuplicatesController",
+    "methodName": "startResolution",
+    "httpMethod": "POST",
+    "path": "/book-duplicates/resolutions",
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-duplicates/book-duplicates.controller.ts",
+    "className": "BookDuplicatesController",
+    "methodName": "getResolution",
+    "httpMethod": "GET",
+    "path": "/book-duplicates/resolutions/:jobId",
+    "permissions": ["Permission.LibraryDeleteBooks", "Permission.LibraryMergeBooks"],
+    "permissionMode": "any",
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/chapter-health/chapter-health.controller.ts",
@@ -45,7 +135,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/chapter-health/chapter-health.controller.ts",
@@ -57,7 +148,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/chapter-health/chapter-health.controller.ts",
@@ -69,7 +161,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/chapter-health/chapter-health.controller.ts",
@@ -81,7 +174,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/chapter-health/chapter-health.controller.ts",
@@ -93,7 +187,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/chapter-health/chapter-health.controller.ts",
@@ -105,7 +200,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/chapter-health/chapter-health.controller.ts",
@@ -117,7 +213,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -129,7 +226,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -141,7 +239,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -153,7 +252,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -165,7 +265,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -177,7 +278,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -189,7 +291,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -201,7 +304,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -213,7 +317,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -225,7 +330,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -237,7 +343,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -249,7 +356,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -261,7 +369,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -273,7 +382,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -285,7 +395,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -297,7 +408,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -309,7 +421,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -321,7 +434,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-dock/book-dock.controller.ts",
@@ -333,7 +447,112 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-dock/library-dock.controller.ts",
+    "className": "LibraryDockController",
+    "methodName": "listUploadTargets",
+    "httpMethod": "GET",
+    "path": "/book-dock/docks",
+    "permissions": ["Permission.BookDockAccess"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/book-dock/library-dock.controller.ts",
+    "className": "LibraryDockController",
+    "methodName": "checkFiling",
+    "httpMethod": "POST",
+    "path": "/book-dock/docks/filing-check",
+    "permissions": ["Permission.ManageBookDock"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-dock/library-dock.controller.ts",
+    "className": "LibraryDockController",
+    "methodName": "getAdmin",
+    "httpMethod": "GET",
+    "path": "/book-dock/docks/admin",
+    "permissions": ["Permission.ManageBookDock"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/book-dock/library-dock.controller.ts",
+    "className": "LibraryDockController",
+    "methodName": "update",
+    "httpMethod": "PUT",
+    "path": "/book-dock/docks/:libraryId",
+    "permissions": ["Permission.ManageBookDock"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-dock/library-dock.controller.ts",
+    "className": "LibraryDockController",
+    "methodName": "renameFolder",
+    "httpMethod": "POST",
+    "path": "/book-dock/docks/:libraryId/rename-folder",
+    "permissions": ["Permission.ManageBookDock"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-dock/library-dock.controller.ts",
+    "className": "LibraryDockController",
+    "methodName": "adoptFolder",
+    "httpMethod": "POST",
+    "path": "/book-dock/docks/folders/adopt",
+    "permissions": ["Permission.ManageBookDock"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-dock/library-dock.controller.ts",
+    "className": "LibraryDockController",
+    "methodName": "moveFolderToUnsorted",
+    "httpMethod": "POST",
+    "path": "/book-dock/docks/folders/move-to-unsorted",
+    "permissions": ["Permission.ManageBookDock"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book-dock/library-dock.controller.ts",
+    "className": "LibraryDockController",
+    "methodName": "removeFolder",
+    "httpMethod": "POST",
+    "path": "/book-dock/docks/folders/remove",
+    "permissions": ["Permission.ManageBookDock"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -345,7 +564,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -357,7 +577,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -369,7 +590,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -381,7 +603,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -393,7 +616,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -405,7 +629,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -417,7 +642,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -429,7 +655,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -441,7 +668,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -453,7 +681,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -465,7 +694,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -477,7 +707,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -489,7 +720,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -501,7 +733,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -513,7 +746,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -525,7 +759,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -537,7 +772,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -549,7 +785,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -561,7 +798,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/statistics/statistics.controller.ts",
@@ -573,7 +811,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/upload/upload.controller.ts",
@@ -585,7 +824,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -597,7 +837,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -609,7 +850,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -621,7 +863,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -633,7 +876,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -645,7 +889,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "interactive"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -657,7 +902,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -669,7 +915,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -681,7 +928,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -693,7 +941,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -705,7 +954,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -717,7 +967,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -729,7 +980,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -741,7 +993,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "interactive"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -753,7 +1006,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "interactive"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -765,7 +1019,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/user/user.controller.ts",
@@ -777,6 +1032,7 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   }
 ]

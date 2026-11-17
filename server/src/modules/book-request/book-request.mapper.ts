@@ -8,6 +8,7 @@ import type {
   BookRequestStatus,
   BookRequestSubscriber,
 } from '@bookorbit/types';
+import { DOWNLOAD_CLIENT_ALWAYS_DELETES_REMOTE } from '@bookorbit/types';
 
 import type { BookRequestJoinedRow } from './book-request.repository';
 import type { BookRequestDownloadJoinedRow } from './fulfillment/book-request-download.repository';
@@ -51,6 +52,7 @@ export function mapBookRequestRow(
     targetFolderId: r.targetFolderId,
     decidedByUserId: r.decidedByUserId,
     decidedByUsername: row.decidedByUsername,
+    decidedByName: row.decidedByName,
     decidedAt: r.decidedAt?.toISOString() ?? null,
     decisionNote: r.decisionNote,
     matchedBookId: r.matchedBookId,
@@ -70,10 +72,23 @@ export function mapBookRequestRow(
   };
 }
 
+/**
+ * Whether removing this attempt from its client takes the downloaded data with it whatever the
+ * caller asks. A refused attempt never reached the client, so nothing is held and nothing gets
+ * deleted there: the generic copy is the honest one for it.
+ */
+export function downloadAlwaysDeletesRemote({
+  download,
+  downloadClientAdapterType,
+}: Pick<BookRequestDownloadJoinedRow, 'download' | 'downloadClientAdapterType'>): boolean {
+  return download.clientKey !== null && downloadClientAdapterType !== null && DOWNLOAD_CLIENT_ALWAYS_DELETES_REMOTE[downloadClientAdapterType];
+}
+
 export function mapBookRequestDownload({
   download,
   downloadClientName,
   downloadClientColor,
+  downloadClientAdapterType,
   indexerName,
   indexerColor,
 }: BookRequestDownloadJoinedRow): BookRequestDownloadItem {
@@ -83,6 +98,7 @@ export function mapBookRequestDownload({
     downloadClientId: download.downloadClientId,
     downloadClientName,
     downloadClientColor,
+    alwaysDeletesRemote: downloadAlwaysDeletesRemote({ download, downloadClientAdapterType }),
     source: download.source as BookRequestDownloadSource,
     indexerId: download.indexerId,
     indexerName,

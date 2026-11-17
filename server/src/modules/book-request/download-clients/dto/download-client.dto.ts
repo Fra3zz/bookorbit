@@ -78,6 +78,11 @@ export class CreateDownloadClientDto {
   @IsBoolean()
   useHardlinks?: boolean;
 
+  /** Optional with a false default, so older callers keep every download in the client. */
+  @IsOptional()
+  @IsBoolean()
+  removeCompletedDownloads?: boolean;
+
   @IsOptional()
   @IsBoolean()
   allowPrivateAddress?: boolean;
@@ -149,6 +154,10 @@ export class UpdateDownloadClientDto {
 
   @IsOptional()
   @IsBoolean()
+  removeCompletedDownloads?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
   allowPrivateAddress?: boolean;
 
   @IsOptional()
@@ -169,4 +178,32 @@ export class TestPathMappingDto {
   @IsInt()
   @Min(1)
   mappingId!: number;
+}
+
+/**
+ * A credential the operator has typed but not saved, checked against the adapter they picked so
+ * the form can say whether an API key is right before a row exists to test.
+ */
+export class ValidateDownloadClientDto {
+  @IsIn(DOWNLOAD_CLIENT_TYPES)
+  adapterType!: DownloadClientType;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(2048)
+  baseUrl!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  username?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1024)
+  password?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  allowPrivateAddress?: boolean;
 }

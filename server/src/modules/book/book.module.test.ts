@@ -16,8 +16,12 @@ import { BookQueryBuilder } from './book-query-builder.service';
 import { BookReadService } from './book-read.service';
 import { BookSortBuilder } from './book-sort-builder.service';
 import { BookController } from './book.controller';
+import { BookEmbedAudioCoverBulkHandler, BookReExtractCoverBulkHandler, BookRefreshMetadataBulkHandler } from './book-bulk-run-handlers';
+import { BookJobSubjectsRepository } from './book-job-subjects.repository';
+import { BookJobSubjects } from './book-job-subjects.service';
 import { BookModule } from './book.module';
 import { BookRepository } from './book.repository';
+import { BookLinkMembersRepository } from './book-link-members.repository';
 import { BookService } from './book.service';
 import { BookAuthorSortKeyBackfillService } from './book-author-sort-key-backfill.service';
 import { ReadingAttemptController } from './reading-attempt.controller';
@@ -39,7 +43,13 @@ describe('BookModule', () => {
     expect(Reflect.getMetadata('controllers', BookModule)).toEqual([BookController, ReadingAttemptController, ReadingProgressController]);
     expect(Reflect.getMetadata('providers', BookModule)).toEqual([
       BookService,
+      BookRefreshMetadataBulkHandler,
+      BookReExtractCoverBulkHandler,
+      BookEmbedAudioCoverBulkHandler,
       BookRepository,
+      BookJobSubjects,
+      BookJobSubjectsRepository,
+      BookLinkMembersRepository,
       BookReadService,
       BookSortBuilder,
       BookQueryBuilder,
@@ -56,6 +66,7 @@ describe('BookModule', () => {
     // without routing through BookService and its RequestUser-based access checks.
     expect(Reflect.getMetadata('exports', BookModule)).toEqual([
       BookService,
+      BookJobSubjects,
       BookReadService,
       BookQueryBuilder,
       AudiolessEpubService,

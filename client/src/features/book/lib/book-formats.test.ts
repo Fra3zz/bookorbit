@@ -1,9 +1,9 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it } from 'vitest'
-import { READ_ALONG_FORMAT_PRIORITY, type BookFileRef } from '@bookorbit/types'
+import { PLAIN_EPUB_FILTER_FORMAT, READ_ALONG_FORMAT_PRIORITY, type BookFileRef } from '@bookorbit/types'
 
 import { i18n } from '@/i18n'
-import { bookFormatEntries, formatKeyCode, formatKeyName, rankedContentFiles } from './book-formats'
+import { bookFormatCodes, bookFormatEntries, formatKeyCode, formatKeyName, rankedContentFiles } from './book-formats'
 
 function file(id: number, format: string | null, role = 'content', extra: Partial<BookFileRef> = {}): BookFileRef {
   return { id, format, role, sizeBytes: 100, ...extra }
@@ -62,11 +62,27 @@ describe('format labels', () => {
   it('shows the file format as the code, EPUB for a read-along', () => {
     expect(formatKeyCode('m4b')).toBe('M4B')
     expect(formatKeyCode(READ_ALONG_FORMAT_PRIORITY)).toBe('EPUB')
+    expect(formatKeyCode(PLAIN_EPUB_FILTER_FORMAT)).toBe('EPUB')
   })
 
   it('names formats from the translated catalog', () => {
     expect(formatKeyName('epub')).toBe('EPUB e-book')
     expect(formatKeyName(READ_ALONG_FORMAT_PRIORITY)).toBe('Read-aloud EPUB')
+    expect(formatKeyName(PLAIN_EPUB_FILTER_FORMAT)).toBe('EPUB without read-aloud')
     expect(formatKeyName('djvu')).toBe('DjVu document')
+  })
+})
+
+describe('bookFormatCodes', () => {
+  it('names each edition once and leaves out covers and sidecars', () => {
+    const codes = bookFormatCodes([
+      file(1, 'epub', 'primary'),
+      file(2, 'jpg', 'cover'),
+      file(3, 'epub', 'content', readAlong),
+      file(4, 'mp3'),
+      file(5, 'mp3'),
+      file(6, 'opf', 'metadata'),
+    ])
+    expect(codes).toEqual(['EPUB', 'MP3'])
   })
 })

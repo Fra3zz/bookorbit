@@ -18,6 +18,7 @@ import { BookMetadataFetchModule } from './book-metadata-fetch.module';
 import { BookMetadataFetchOrchestratorService } from './book-metadata-fetch-orchestrator.service';
 import { BookMetadataFetchQueueRepository } from './book-metadata-fetch-queue.repository';
 import { BookMetadataFetchSessionService } from './book-metadata-fetch-session.service';
+import { MetadataFetchJobSource } from './metadata-fetch-job-source';
 
 describe('BookMetadataFetchModule', () => {
   it('registers expected controller and provider graph', () => {
@@ -34,32 +35,20 @@ describe('BookMetadataFetchModule', () => {
         BookMetadataFetchConfigService,
         BookMetadataFetchOrchestratorService,
         BookMetadataFetchGateway,
+        MetadataFetchJobSource,
       ]),
     );
     expect(exports).toEqual([BookMetadataFetchOrchestratorService]);
   });
 
-  it('keeps the book forwardRef import and config-driven jwt factory', () => {
+  it('keeps the book forwardRef import and leaves socket authentication to the global authenticator', () => {
     const imports = Reflect.getMetadata(MODULE_METADATA.IMPORTS, BookMetadataFetchModule) as Array<{
       forwardRef?: () => unknown;
-      providers?: Array<{ useFactory?: (config: { getOrThrow: (key: string) => string }) => unknown }>;
+      providers?: unknown[];
     }>;
 
     const forwardRefImport = imports.find((entry) => typeof entry.forwardRef === 'function');
     expect(forwardRefImport?.forwardRef?.()).toBe(BookModule);
-
-    const jwtFactory = imports.flatMap((entry) => entry.providers ?? []).find((provider) => typeof provider.useFactory === 'function')?.useFactory;
-
-    expect(jwtFactory).toBeDefined();
-    const config = {
-      getOrThrow: vi.fn((key: string) => {
-        if (key === 'auth.jwtSecret') return 'secret';
-        if (key === 'auth.jwtExpiresIn') return '1h';
-        throw new Error(`unexpected key: ${key}`);
-      }),
-    };
-    const options = jwtFactory?.(config) as { secret: string; signOptions: { expiresIn: string } };
-
-    expect(options).toEqual({ secret: 'secret', signOptions: { expiresIn: '1h' } });
+    expect(imports.some((entry) => Array.isArray(entry.providers))).toBe(false);
   });
 });

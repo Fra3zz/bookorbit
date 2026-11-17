@@ -1,5 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { BookCopy } from '@lucide/vue'
 import type { BookMovePreviewResult, BookSelectionPayload, Library } from '@bookorbit/types'
 import MoveToLibrarySheet from '../MoveToLibrarySheet.vue'
 
@@ -95,8 +96,9 @@ const globalStubs = {
       template: '<input data-testid="search-input" :class="$props.class" :value="modelValue" :placeholder="placeholder" />',
     },
     AppIcon: {
+      name: 'AppIcon',
       props: ['icon', 'fallback', 'size'],
-      template: '<span data-testid="app-icon" :data-icon="icon" :data-fallback="fallback" />',
+      template: '<span data-testid="app-icon" :data-icon="icon" />',
     },
   },
 }
@@ -134,7 +136,7 @@ describe('destination list', () => {
 
     const icons = wrapper.findAll('[data-testid="app-icon"]')
     expect(icons.map((icon) => icon.attributes('data-icon'))).toEqual(['BookMarked', 'FileText'])
-    expect(icons[0].attributes('data-fallback')).toBe('BookCopy')
+    expect(wrapper.findAllComponents({ name: 'AppIcon' })[0].props('fallback')).toBe(BookCopy)
   })
 
   it('uses a single search control with no nested bordered wrapper', async () => {
@@ -206,5 +208,42 @@ describe('after a move', () => {
 
     expect(refreshLibrariesMock).not.toHaveBeenCalled()
     expect(wrapper.emitted('moved')).toBeUndefined()
+  })
+})
+
+describe('a move in progress', () => {
+  async function startMove(wrapper: ReturnType<typeof mountSheet>) {
+    await flushPromises()
+    await wrapper.findAll('button[aria-pressed]')[1].trigger('click')
+    await buttonByText(wrapper, 'Continue').trigger('click')
+    await flushPromises()
+  }
+
+  it('shows the move waiting to start and says it keeps running if the sheet closes', async () => {
+    const body = new ReadableStream<Uint8Array>({ start() {} })
+    executeMoveMock.mockResolvedValue({ ok: true, status: 200, body, headers: new Headers({ 'X-Bulk-Run-Id': 'run-3' }) } as unknown as Response)
+
+    const wrapper = mountSheet()
+    await startMove(wrapper)
+
+    expect(wrapper.get('[data-testid="move-progress-status"]').text()).toBe('Waiting to start')
+    expect(wrapper.text()).toContain('You can close this. The move keeps running, and Jobs shows how far it got.')
+  })
+
+  it('offers Jobs when the move stopped without a summary', async () => {
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ bookId: 1, status: 'success' })}\n\n`))
+        controller.close()
+      },
+    })
+    executeMoveMock.mockResolvedValue({ ok: true, status: 200, body, headers: new Headers({ 'X-Bulk-Run-Id': 'run-3' }) } as unknown as Response)
+
+    const wrapper = mountSheet()
+    await startMove(wrapper)
+
+    expect(wrapper.text()).toContain('The bulk action stopped before it finished.')
+    expect(wrapper.find('[data-testid="move-open-jobs"]').exists()).toBe(true)
   })
 })

@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { bigint, boolean, check, index, integer, jsonb, pgTable, serial, text, timestamp, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
 
-import type { IndexerColor, ReleaseUnitChoice } from '@bookorbit/types';
+import type { DownloadClientType, IndexerColor, ReleaseUnitChoice } from '@bookorbit/types';
 
 import { bookDockFiles } from './book-dock';
 import { bookRequests } from './book-requests';
@@ -20,7 +20,7 @@ export const downloadClients = pgTable(
     id: serial('id').primaryKey(),
     name: varchar('name', { length: 100 }).notNull(),
     color: varchar('color', { length: 16 }).$type<IndexerColor>(),
-    adapterType: varchar('adapter_type', { length: 30 }).notNull(),
+    adapterType: varchar('adapter_type', { length: 30 }).$type<DownloadClientType>().notNull(),
     enabled: boolean('enabled').notNull().default(true),
     priority: integer('priority').notNull().default(1),
 
@@ -32,6 +32,8 @@ export const downloadClients = pgTable(
     /** Tags our torrents in the client so BookOrbit only ever touches its own. */
     category: varchar('category', { length: 100 }).notNull().default('bookorbit'),
     useHardlinks: boolean('use_hardlinks').notNull().default(true),
+    /** Drop a finished Usenet job and its folder once the Book Dock holds the import. */
+    removeCompletedDownloads: boolean('remove_completed_downloads').notNull().default(false),
     /** Per-row SSRF opt-in: clients usually live on the LAN, indexers do not. */
     allowPrivateAddress: boolean('allow_private_address').notNull().default(true),
     settings: jsonb('settings').$type<Record<string, unknown>>(),
@@ -49,7 +51,10 @@ export const downloadClients = pgTable(
   (t) => [
     uniqueIndex('download_clients_name_lower_uidx').on(sql`lower(${t.name})`),
     index('download_clients_enabled_priority_idx').on(t.enabled, t.priority),
-    check('download_clients_adapter_type_chk', sql`${t.adapterType} in ('qbittorrent', 'transmission', 'deluge', 'nzbget', 'sabnzbd')`),
+    check(
+      'download_clients_adapter_type_chk',
+      sql`${t.adapterType} in ('qbittorrent', 'transmission', 'deluge', 'rtorrent', 'nzbget', 'sabnzbd', 'torbox')`,
+    ),
 
     check('download_clients_priority_range_chk', sql`${t.priority} >= 1 and ${t.priority} <= 100`),
   ],
@@ -143,6 +148,8 @@ export const bookRequestDownloads = pgTable(
     releaseUnits: jsonb('release_units').$type<ReleaseUnitChoice[]>(),
 
     errorMessage: text('error_message'),
+    /** A stable reason for a failed attempt where one is known, such as `removed` for one a person cancelled. */
+    failureCode: varchar('failure_code', { length: 30 }),
     grabbedAt: timestamp('grabbed_at', { withTimezone: true }),
     /** Last tick that saw bytes move. The stall watchdog reads this, not `updatedAt`. */
     lastProgressAt: timestamp('last_progress_at', { withTimezone: true }),

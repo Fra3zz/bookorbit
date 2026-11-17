@@ -11,6 +11,8 @@ import { AppModule } from '../src/app.module';
 import { DB } from '../src/db';
 import * as schema from '../src/db/schema';
 import { MetadataService } from '../src/modules/metadata/metadata.service';
+import { NotificationGateway } from '../src/modules/notification/notification.gateway';
+import { WS_UNAUTHORIZED_EVENT } from '../src/common/utils/ws-auth.utils';
 import { makeMetadataNoopMock } from './e2e/app-harness';
 import type { Db } from './e2e/app-harness';
 
@@ -470,7 +472,7 @@ describe('Auth session security (e2e)', () => {
       expect(response.statusCode).toBe(401);
     });
 
-    it('rejects refresh with expired token and clears the refresh cookie', async () => {
+    it('rejects refresh with expired token and clears the session cookies', async () => {
       const credentials = await createLocalUser(context.db);
       const loginResult = await login(context.app, credentials.username, credentials.password);
       const tokenRow = await findRefreshTokenByRawToken(context.db, loginResult.refreshToken);
@@ -492,7 +494,7 @@ describe('Auth session security (e2e)', () => {
       expect(response.statusCode).toBe(401);
       const responseCookies = getSetCookieLines(response.headers);
       expect(cookieValue(responseCookies, 'refresh_token')).toBe('');
-      expect(cookieValue(responseCookies, 'access_token')).toBeNull();
+      expect(cookieValue(responseCookies, 'access_token')).toBe('');
     });
 
     it('rejects refresh for disabled users and clears both auth cookies', async () => {
@@ -594,7 +596,7 @@ describe('Auth session security (e2e)', () => {
       expect(replayAccessToken).toEqual(expect.any(String));
 
       const reuseCookies = getSetCookieLines(reuseResponse.headers);
-      expect(cookieValue(reuseCookies, 'refresh_token')).toBeNull();
+      expect(cookieValue(reuseCookies, 'refresh_token')).toEqual(expect.any(String));
       expect(cookieValue(reuseCookies, 'access_token')).toEqual(expect.any(String));
 
       expect(await activeSessionCount(context.db, credentials.userId)).toBe(1);
@@ -819,11 +821,11 @@ describe('Auth session security (e2e)', () => {
 
       expect(sessionsResponse.statusCode).toBe(200);
       const sessions = sessionsResponse.json() as Array<{ id: number }>;
-      expect(sessions.map((session) => session.id)).toEqual(expect.arrayContaining([sessionARow!.id, sessionBRow!.id]));
+      expect(sessions.map((session) => session.id)).toEqual(expect.arrayContaining([sessionARow!.sessionId, sessionBRow!.sessionId]));
 
       const revokeResponse = await context.app.inject({
         method: 'DELETE',
-        url: `/api/v1/auth/sessions/${sessionARow!.id}`,
+        url: `/api/v1/auth/sessions/${sessionARow!.sessionId}`,
         headers: {
           authorization: `Bearer ${sessionB.accessToken}`,
         },
@@ -839,14 +841,14 @@ describe('Auth session security (e2e)', () => {
       });
       expect(sessionsAfterRevoke.statusCode).toBe(200);
       const activeSessionIds = (sessionsAfterRevoke.json() as Array<{ id: number }>).map((session) => session.id);
-      expect(activeSessionIds).toContain(sessionBRow!.id);
-      expect(activeSessionIds).not.toContain(sessionARow!.id);
+      expect(activeSessionIds).toContain(sessionBRow!.sessionId);
+      expect(activeSessionIds).not.toContain(sessionARow!.sessionId);
 
       const otherUser = await createLocalUser(context.db, { password: 'OtherPass123' });
       const otherSession = await login(context.app, otherUser.username, otherUser.password);
       const forbiddenResponse = await context.app.inject({
         method: 'DELETE',
-        url: `/api/v1/auth/sessions/${sessionBRow!.id}`,
+        url: `/api/v1/auth/sessions/${sessionBRow!.sessionId}`,
         headers: {
           authorization: `Bearer ${otherSession.accessToken}`,
         },
@@ -879,6 +881,39 @@ describe('Auth session security (e2e)', () => {
         },
       });
       expect(revokedSessionRefresh.statusCode).toBe(401);
+    }, 15_000);
+
+    it('refuses the notification socket for a revoked session while its access token is still unexpired', async () => {
+      const owner = await createLocalUser(context.db, { password: 'SocketPass123' });
+      await context.db.insert(schema.userPermissions).values({ userId: owner.userId, permissionName: Permission.NotificationAccess });
+      const revoked = await login(context.app, owner.username, owner.password);
+      const kept = await login(context.app, owner.username, owner.password);
+      const revokedRow = await findRefreshTokenByRawToken(context.db, revoked.refreshToken);
+      const gateway = context.app.get(NotificationGateway);
+      const connect = async (token: string) => {
+        const client = { id: `socket-${randomUUID()}`, handshake: { auth: { token } }, data: {}, join: vi.fn(), emit: vi.fn(), disconnect: vi.fn() };
+        await gateway.handleConnection(client as never);
+        return client;
+      };
+
+      const before = await connect(revoked.accessToken);
+      expect(before.disconnect).not.toHaveBeenCalled();
+      expect(before.join).toHaveBeenCalledWith(`user:${owner.userId}`);
+
+      const revokeResponse = await context.app.inject({
+        method: 'DELETE',
+        url: `/api/v1/auth/sessions/${revokedRow!.sessionId}`,
+        headers: { authorization: `Bearer ${kept.accessToken}` },
+      });
+      expect(revokeResponse.statusCode).toBe(204);
+
+      const after = await connect(revoked.accessToken);
+      expect(after.emit).toHaveBeenCalledWith(WS_UNAUTHORIZED_EVENT, { reason: 'invalid_token' });
+      expect(after.disconnect).toHaveBeenCalledTimes(1);
+      expect(after.join).not.toHaveBeenCalled();
+
+      const other = await connect(kept.accessToken);
+      expect(other.disconnect).not.toHaveBeenCalled();
     }, 15_000);
   });
 });

@@ -16,10 +16,12 @@ import {
 
 import { AuditAction, AuditResource } from '@bookorbit/types';
 import type { BookQuery, JumpBucketsQuery } from '@bookorbit/types';
+import { KeyReadSafe } from '../../common/decorators/api-key-policy.decorator';
 import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import type { RequestUser } from '../../common/types/request-user';
+import { RequireAppAttest } from '../app-attest/app-attest.guard';
 import { OptionalIntQueryPipe } from '../../common/pipes/optional-int-query.pipe';
 import { BookQueryPipe, JumpBucketsQueryPipe } from '../book/pipes/book-query.pipe';
 import { CreateSmartScopeDto } from './dto/create-smart-scope.dto';
@@ -115,6 +117,7 @@ export class SmartScopeController {
   }
 
   @Get(':id/books')
+  @RequireAppAttest()
   executeSmartScope(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
@@ -128,11 +131,13 @@ export class SmartScopeController {
   }
 
   @Post(':id/books/query')
+  @KeyReadSafe()
   queryBooks(@Param('id', ParseIntPipe) id: number, @Body(BookQueryPipe) query: BookQuery, @CurrentUser() user: RequestUser) {
     return this.smartScopeService.queryBooks(id, user, query);
   }
 
   @Post(':id/books/jump-buckets')
+  @KeyReadSafe()
   queryJumpBuckets(@Param('id', ParseIntPipe) id: number, @Body(JumpBucketsQueryPipe) query: JumpBucketsQuery, @CurrentUser() user: RequestUser) {
     return this.smartScopeService.queryJumpBuckets(id, user, query);
   }
